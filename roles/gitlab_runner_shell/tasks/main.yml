@@ -1,0 +1,58 @@
+---
+- name: Install GitLab Runner prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+    state: present
+    update_cache: true
+
+- name: Download GitLab Runner package
+  ansible.builtin.get_url:
+    url: "{{ gitlab_runner_install_url }}"
+    dest: /tmp/gitlab-runner.deb
+    mode: '0644'
+
+- name: Install GitLab Runner
+  ansible.builtin.apt:
+    deb: /tmp/gitlab-runner.deb
+
+- name: Check runner registration
+  ansible.builtin.command: gitlab-runner verify --delete
+  register: gitlab_runner_verify
+  changed_when: false
+  failed_when: false
+
+- name: Register GitLab Runner
+  ansible.builtin.command:
+    argv:
+      - gitlab-runner
+      - register
+      - --non-interactive
+      - --url
+      - "{{ gitlab_url }}"
+      - --token
+      - "{{ gitlab_runner_token }}"
+      - --executor
+      - "{{ gitlab_runner_executor }}"
+      - --shell
+      - "{{ gitlab_runner_shell }}"
+      - --description
+      - "{{ gitlab_runner_description }}"
+      - --tag-list
+      - "{{ gitlab_runner_tags | join(',') }}"
+      - --run-untagged=false
+      - --locked=false
+      - --access-level
+      - not_protected
+  no_log: true
+  when:
+    - gitlab_runner_token is defined
+    - gitlab_runner_token not in ['CHANGE_ME_IN_ANSIBLE_VAULT', '']
+    - gitlab_runner_verify.rc != 0
+
+- name: Enable GitLab Runner
+  ansible.builtin.service:
+    name: gitlab-runner
+    enabled: true
+    state: started

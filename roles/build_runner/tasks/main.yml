@@ -1,0 +1,45 @@
+---
+- name: Install rootless image build packages
+  ansible.builtin.apt:
+    name: "{{ build_runner_packages }}"
+    state: present
+    update_cache: true
+
+- name: Create image builder user
+  ansible.builtin.user:
+    name: "{{ build_runner_user }}"
+    create_home: true
+    shell: /bin/bash
+    groups:
+      - video
+    append: true
+
+- name: Configure subordinate UID range
+  ansible.builtin.lineinfile:
+    path: /etc/subuid
+    regexp: "^{{ build_runner_user }}:"
+    line: "{{ build_runner_user }}:{{ build_runner_subuid_start }}:{{ build_runner_subuid_count }}"
+    create: true
+
+- name: Configure subordinate GID range
+  ansible.builtin.lineinfile:
+    path: /etc/subgid
+    regexp: "^{{ build_runner_user }}:"
+    line: "{{ build_runner_user }}:{{ build_runner_subuid_start }}:{{ build_runner_subuid_count }}"
+    create: true
+
+- name: Verify rootless Buildah
+  become_user: "{{ build_runner_user }}"
+  ansible.builtin.command: buildah info
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ (build_runner_user_info.uid | default(1000)) }}"
+  register: buildah_info
+  changed_when: false
+  failed_when: false
+
+- name: Verify rootless Podman
+  become_user: "{{ build_runner_user }}"
+  ansible.builtin.command: podman info
+  register: podman_info
+  changed_when: false
+  failed_when: false

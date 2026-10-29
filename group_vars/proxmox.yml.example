@@ -1,0 +1,73 @@
+---
+# Copy to group_vars/proxmox.yml and keep it uncommitted.
+# Store proxmox_api_token_secret and container passwords in
+# group_vars/vault.yml via ansible-vault.
+proxmox_api_host: 192.168.100.20
+proxmox_api_user: ansible@pve
+proxmox_api_token_id: lxc-provisioner
+proxmox_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+proxmox_validate_certs: true
+proxmox_node: pve
+
+proxmox_lxc_containers:
+  - vmid: 201
+    hostname: postgres-ci
+    ostemplate: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+    storage: local-lvm
+    disk_size: 16
+    cores: 2
+    memory: 2048
+    swap: 512
+    unprivileged: true
+    password: "{{ vault_lxc_password }}"
+    netif:
+      net0: name=eth0,bridge=vmbr0,ip=192.168.100.21/24,gw=192.168.100.1
+    ssh_public_keys: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+    service_group: postgres_ci
+
+  - vmid: 202
+    hostname: valkey-ci
+    ostemplate: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+    storage: local-lvm
+    disk_size: 8
+    cores: 1
+    memory: 1024
+    swap: 512
+    unprivileged: true
+    password: "{{ vault_lxc_password }}"
+    netif:
+      net0: name=eth0,bridge=vmbr0,ip=192.168.100.22/24,gw=192.168.100.1
+    ssh_public_keys: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+    service_group: valkey_ci
+
+  - vmid: 203
+    hostname: runner-ci
+    ostemplate: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+    storage: local-lvm
+    disk_size: 16
+    cores: 2
+    memory: 2048
+    swap: 512
+    unprivileged: true
+    password: "{{ vault_lxc_password }}"
+    netif:
+      net0: name=eth0,bridge=vmbr0,ip=192.168.100.23/24,gw=192.168.100.1
+    ssh_public_keys: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+    service_group: gitlab_runner
+
+  - vmid: 204
+    hostname: runner-build
+    ostemplate: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
+    storage: local-lvm
+    disk_size: 32
+    cores: 2
+    memory: 4096
+    swap: 1024
+    unprivileged: true
+    password: "{{ vault_lxc_password }}"
+    features:
+      - nesting=1
+    netif:
+      net0: name=eth0,bridge=vmbr0,ip=192.168.100.24/24,gw=192.168.100.1
+    ssh_public_keys: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+    service_group: build_runner

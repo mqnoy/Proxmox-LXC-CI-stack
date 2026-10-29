@@ -1,0 +1,5 @@
+---
+gitlab_runner_package_arch: amd64
+gitlab_runner_package_version: latest
+gitlab_runner_install_url: "https://gitlab-runner-downloads.s3.amazonaws.com/{{ gitlab_runner_package_version }}/deb/gitlab-runner_{{ gitlab_runner_package_arch }}.deb"
+gitlab_runner_config_path: /etc/gitlab-runner/config.toml

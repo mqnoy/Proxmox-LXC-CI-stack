@@ -1,0 +1,31 @@
+---
+all:
+  vars:
+    ansible_user: ansible
+    ansible_become: true
+    ci_postgres_host: postgres-ci
+    ci_postgres_port: 5432
+    ci_valkey_host: valkey-ci
+    ci_valkey_port: 6379
+    gitlab_url: https://gitlab.com/
+    gitlab_runner_description: proxmox-lxc-shell-runner
+    gitlab_runner_tags:
+      - lxc-shell
+    gitlab_runner_token: "{{ gitlab_runner_token }}"
+  children:
+    postgres_ci:
+      hosts:
+        postgres-ci:
+          ansible_host: 192.168.100.21
+    valkey_ci:
+      hosts:
+        valkey-ci:
+          ansible_host: 192.168.100.22
+    gitlab_runner:
+      hosts:
+        runner-ci:
+          ansible_host: 192.168.100.23
+    build_runner:
+      hosts:
+        runner-build:
+          ansible_host: 192.168.100.24

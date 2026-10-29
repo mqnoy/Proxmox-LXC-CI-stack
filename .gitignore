@@ -1,0 +1,3 @@
+inventory.yml
+group_vars/proxmox.yml
+group_vars/vault.yml

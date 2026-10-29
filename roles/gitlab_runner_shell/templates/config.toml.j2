@@ -1,0 +1,11 @@
+concurrent = 1
+check_interval = 0
+
+[[runners]]
+  name = "{{ gitlab_runner_description }}"
+  url = "{{ gitlab_url }}"
+  executor = "{{ gitlab_runner_executor }}"
+  shell = "{{ gitlab_runner_shell }}"
+  tags = ["{{ gitlab_runner_tags | join('", "') }}"]
+  [runners.cache]
+    Type = ""

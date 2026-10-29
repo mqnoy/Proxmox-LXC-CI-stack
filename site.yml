@@ -1,0 +1,30 @@
+---
+- name: Configure shared LXC prerequisites
+  hosts: all
+  become: true
+  roles:
+    - common
+
+- name: Configure PostgreSQL CI service
+  hosts: postgres_ci
+  become: true
+  roles:
+    - postgres_ci
+
+- name: Configure Valkey CI service
+  hosts: valkey_ci
+  become: true
+  roles:
+    - valkey_ci
+
+- name: Configure GitLab shell runner
+  hosts: gitlab_runner
+  become: true
+  roles:
+    - gitlab_runner_shell
+
+- name: Configure rootless image build runner
+  hosts: build_runner
+  become: true
+  roles:
+    - build_runner

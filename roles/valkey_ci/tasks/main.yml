@@ -1,0 +1,23 @@
+---
+- name: Install Valkey
+  ansible.builtin.apt:
+    name: valkey-server
+    state: present
+    update_cache: true
+
+- name: Configure Valkey private listener
+  ansible.builtin.lineinfile:
+    path: /etc/valkey/valkey.conf
+    regexp: '^bind '
+    line: "bind {{ ci_valkey_listen_address }}"
+  notify: Restart Valkey
+
+- name: Enable Valkey
+  ansible.builtin.service:
+    name: valkey-server
+    enabled: true
+    state: started
+
+- name: Verify Valkey readiness
+  ansible.builtin.command: valkey-cli -h 127.0.0.1 -p {{ ci_valkey_port }} ping
+  changed_when: false

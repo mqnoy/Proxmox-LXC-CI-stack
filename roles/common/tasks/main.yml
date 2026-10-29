@@ -1,0 +1,21 @@
+---
+- name: Install shared packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - git
+      - gnupg
+      - jq
+      - python3
+      - python3-apt
+      - unzip
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable time synchronization
+  ansible.builtin.service:
+    name: systemd-timesyncd
+    enabled: true
+    state: started

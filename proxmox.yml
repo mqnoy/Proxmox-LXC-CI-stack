@@ -1,0 +1,7 @@
+---
+- name: Provision declared Proxmox LXC containers
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - proxmox_lxc

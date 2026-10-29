@@ -1,0 +1,33 @@
+---
+- name: Install PostgreSQL
+  ansible.builtin.apt:
+    name:
+      - postgresql
+      - postgresql-client
+    state: present
+    update_cache: true
+
+- name: Ensure PostgreSQL listens on private interfaces
+  ansible.builtin.lineinfile:
+    path: /etc/postgresql/16/main/postgresql.conf
+    regexp: '^#?listen_addresses'
+    line: "listen_addresses = '{{ ci_postgres_listen_address }}'"
+  notify: Restart PostgreSQL
+
+- name: Ensure CI database exists
+  become_user: postgres
+  community.postgresql.postgresql_db:
+    name: "{{ ci_postgres_database }}"
+
+- name: Ensure CI database user exists
+  become_user: postgres
+  community.postgresql.postgresql_user:
+    name: "{{ ci_postgres_user }}"
+    password: "{{ ci_postgres_password }}"
+    db: "{{ ci_postgres_database }}"
+    priv: "{{ ci_postgres_database }}:ALL"
+    state: present
+
+- name: Verify PostgreSQL readiness
+  ansible.builtin.command: pg_isready -h 127.0.0.1 -p {{ ci_postgres_port }}
+  changed_when: false

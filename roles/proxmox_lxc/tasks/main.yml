@@ -1,0 +1,54 @@
+---
+- name: Validate Proxmox LXC declarations
+  ansible.builtin.assert:
+    that:
+      - item.vmid is defined
+      - item.hostname is defined
+      - item.ostemplate is defined
+      - item.netif is defined
+    fail_msg: "Each proxmox_lxc_containers item requires vmid, hostname, ostemplate, and netif"
+  loop: "{{ proxmox_lxc_containers }}"
+  loop_control:
+    label: "{{ item.hostname | default(item.vmid | default('unknown')) }}"
+
+- name: Create or update Proxmox LXC containers
+  community.proxmox.proxmox:
+    api_host: "{{ proxmox_api_host }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    validate_certs: "{{ proxmox_validate_certs }}"
+    node: "{{ proxmox_node }}"
+    vmid: "{{ item.vmid }}"
+    hostname: "{{ item.hostname }}"
+    ostemplate: "{{ item.ostemplate }}"
+    storage: "{{ item.storage }}"
+    disk: "{{ item.disk_size }}"
+    cores: "{{ item.cores }}"
+    memory: "{{ item.memory }}"
+    swap: "{{ item.swap }}"
+    unprivileged: "{{ item.unprivileged | default(true) }}"
+    password: "{{ item.password }}"
+    netif: "{{ item.netif }}"
+    pubkey: "{{ item.ssh_public_keys | default(omit) }}"
+    features: "{{ item.features | default(omit) }}"
+    state: present
+  loop: "{{ proxmox_lxc_containers }}"
+  loop_control:
+    label: "{{ item.vmid }} {{ item.hostname }}"
+  no_log: true
+
+- name: Start Proxmox LXC containers
+  community.proxmox.proxmox:
+    api_host: "{{ proxmox_api_host }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    validate_certs: "{{ proxmox_validate_certs }}"
+    node: "{{ proxmox_node }}"
+    vmid: "{{ item.vmid }}"
+    state: started
+  loop: "{{ proxmox_lxc_containers }}"
+  loop_control:
+    label: "{{ item.vmid }} {{ item.hostname }}"
+  no_log: true
