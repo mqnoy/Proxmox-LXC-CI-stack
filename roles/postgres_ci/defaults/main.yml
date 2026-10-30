@@ -1,0 +1,7 @@
+---
+ci_postgres_version: "17"
+ci_postgres_port: 5432
+ci_postgres_listen_address: "127.0.0.1,192.168.100.21"
+
+ci_postgres_database: "ci_database"
+ci_postgres_user: "ci_user"

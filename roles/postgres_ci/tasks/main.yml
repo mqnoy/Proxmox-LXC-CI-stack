@@ -1,33 +1,111 @@
+
 ---
-- name: Install PostgreSQL
+- name: Install PostgreSQL repository prerequisites
   ansible.builtin.apt:
     name:
-      - postgresql
-      - postgresql-client
+      - ca-certificates
+      - curl
     state: present
     update_cache: true
 
-- name: Ensure PostgreSQL listens on private interfaces
+- name: Create PostgreSQL repository key directory
+  ansible.builtin.file:
+    path: /usr/share/postgresql-common/pgdg
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download PostgreSQL repository signing key
+  ansible.builtin.get_url:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    dest: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure PostgreSQL PGDG repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/pgdg.sources
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Types: deb
+      URIs: https://apt.postgresql.org/pub/repos/apt
+      Suites: bookworm-pgdg
+      Components: main
+      Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+  register: pgdg_repository
+
+- name: Update APT cache after adding PostgreSQL repository
+  ansible.builtin.apt:
+    update_cache: true
+
+- name: Install PostgreSQL {{ ci_postgres_version }}
+  ansible.builtin.apt:
+    name:
+      - "postgresql-{{ ci_postgres_version }}"
+      - "postgresql-client-{{ ci_postgres_version }}"
+    state: present
+
+- name: Configure PostgreSQL listen address
   ansible.builtin.lineinfile:
-    path: /etc/postgresql/16/main/postgresql.conf
-    regexp: '^#?listen_addresses'
+    path: "/etc/postgresql/{{ ci_postgres_version }}/main/postgresql.conf"
+    regexp: '^#?listen_addresses\s*='
     line: "listen_addresses = '{{ ci_postgres_listen_address }}'"
   notify: Restart PostgreSQL
+
+- name: Allow CI containers to authenticate to PostgreSQL
+  ansible.builtin.lineinfile:
+    path: "/etc/postgresql/{{ ci_postgres_version }}/main/pg_hba.conf"
+    line: "host {{ ci_postgres_database }} {{ ci_postgres_user }} 192.168.100.0/24 scram-sha-256"
+    state: present
+  notify: Restart PostgreSQL
+
+- name: Ensure PostgreSQL is enabled and started
+  ansible.builtin.service:
+    name: postgresql
+    enabled: true
+    state: started
+
+- name: Apply PostgreSQL configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Install PostgreSQL Python driver
+  ansible.builtin.apt:
+    name: python3-psycopg2
+    state: present
 
 - name: Ensure CI database exists
   become_user: postgres
   community.postgresql.postgresql_db:
     name: "{{ ci_postgres_database }}"
+    state: present
 
 - name: Ensure CI database user exists
   become_user: postgres
   community.postgresql.postgresql_user:
     name: "{{ ci_postgres_user }}"
     password: "{{ ci_postgres_password }}"
-    db: "{{ ci_postgres_database }}"
-    priv: "{{ ci_postgres_database }}:ALL"
+    state: present
+  no_log: true
+
+- name: Grant privileges on CI database
+  become_user: postgres
+  community.postgresql.postgresql_privs:
+    database: "{{ ci_postgres_database }}"
+    roles: "{{ ci_postgres_user }}"
+    type: database
+    privs: ALL
     state: present
 
 - name: Verify PostgreSQL readiness
-  ansible.builtin.command: pg_isready -h 127.0.0.1 -p {{ ci_postgres_port }}
+  ansible.builtin.command:
+    argv:
+      - pg_isready
+      - -h
+      - 127.0.0.1
+      - -p
+      - "{{ ci_postgres_port | string }}"
   changed_when: false
