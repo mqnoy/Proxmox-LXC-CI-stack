@@ -1,9 +1,62 @@
 ---
+- name: Install Percona repository package
+  ansible.builtin.apt:
+    deb: "https://repo.percona.com/apt/percona-release_latest.bookworm_all.deb"
+    state: present
+
+- name: Enable Percona Valkey 9.1 repository
+  ansible.builtin.command:
+    argv:
+      - percona-release
+      - enable
+      - valkey-91
+      - release
+    creates: /etc/apt/sources.list.d/percona-valkey-91-release.list
+
+- name: Update APT cache
+  ansible.builtin.apt:
+    update_cache: true
+
 - name: Install Valkey
   ansible.builtin.apt:
-    name: valkey-server
+    name: "{{ ci_valkey_package }}"
     state: present
-    update_cache: true
+
+- name: Create Valkey systemd override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/valkey-server.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Relax systemd namespace restrictions for unprivileged LXC
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/valkey-server.service.d/lxc.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Service]
+      PrivateTmp=false
+      PrivateDevices=false
+      PrivateUsers=false
+      ProtectHome=false
+      ProtectSystem=false
+      ProtectProc=default
+      ProtectKernelTunables=false
+      ProtectKernelModules=false
+      ProtectControlGroups=false
+      ProtectClock=false
+      ProtectHostname=false
+      ReadWritePaths=/var/lib/valkey /var/log/valkey /var/run/valkey /etc/valkey
+      NoExecPaths=
+      ExecPaths=
+  notify: Restart Valkey
+
+- name: Reload systemd configuration
+  ansible.builtin.systemd:
+    daemon_reload: true
 
 - name: Configure Valkey private listener
   ansible.builtin.lineinfile:
@@ -12,12 +65,47 @@
     line: "bind {{ ci_valkey_listen_address }}"
   notify: Restart Valkey
 
-- name: Enable Valkey
+- name: Validate Valkey password
+  ansible.builtin.assert:
+    that:
+      - ci_valkey_password is defined
+      - ci_valkey_password | length >= 32
+    fail_msg: "A Valkey password of at least 32 characters is required."
+  no_log: true
+
+- name: Configure Valkey authentication
+  ansible.builtin.lineinfile:
+    path: "{{ ci_valkey_config_path }}"
+    regexp: '^#?\s*requirepass\s+'
+    line: "requirepass {{ ci_valkey_password }}"
+    owner: root
+    group: valkey
+    mode: "0640"
+  notify: Restart Valkey
+  no_log: true
+
+- name: Apply Valkey configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Ensure Valkey is enabled and started
   ansible.builtin.service:
-    name: valkey-server
+    name: "{{ ci_valkey_service }}"
     enabled: true
     state: started
 
-- name: Verify Valkey readiness
-  ansible.builtin.command: valkey-cli -h 127.0.0.1 -p {{ ci_valkey_port }} ping
+- name: Verify Valkey readiness with authentication
+  ansible.builtin.command:
+    argv:
+      - valkey-cli
+      - -h
+      - 127.0.0.1
+      - -p
+      - "{{ ci_valkey_port | string }}"
+      - --no-auth-warning
+      - ping
+  environment:
+    REDISCLI_AUTH: "{{ ci_valkey_password }}"
   changed_when: false
+  register: valkey_ping
+  failed_when: valkey_ping.stdout != "PONG"
+  no_log: true

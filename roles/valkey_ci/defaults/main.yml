@@ -1,0 +1,7 @@
+---
+ci_valkey_port: 6379
+ci_valkey_listen_address: "127.0.0.1 192.168.100.22"
+
+ci_valkey_package: percona-valkey-server
+ci_valkey_service: valkey
+ci_valkey_config_path: /etc/valkey/valkey.conf
