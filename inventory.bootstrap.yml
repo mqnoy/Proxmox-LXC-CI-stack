@@ -1,0 +1,20 @@
+---
+all:
+  vars:
+    ansible_user: root
+    ansible_become: false
+    ansible_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519"
+    ansible_python_interpreter: /usr/bin/python3
+
+  children:
+    lxc_bootstrap:
+      hosts:
+        postgres-ci:
+          ansible_host: 192.168.100.21
+        valkey-ci:
+          ansible_host: 192.168.100.22
+        gitlab-runner-shell-01:
+          ansible_host: 192.168.100.23
+        gitlab-runner-build-01:
+          ansible_host: 192.168.100.24
+          

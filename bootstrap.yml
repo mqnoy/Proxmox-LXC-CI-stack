@@ -1,0 +1,38 @@
+---
+- name: Bootstrap Ansible access on Proxmox LXC
+  hosts: lxc_bootstrap
+  gather_facts: false
+  become: true
+
+  vars_files:
+    - group_vars/proxmox.yml
+
+  tasks:
+    - name: Ensure Ansible user exists
+      ansible.builtin.user:
+        name: ansible
+        home: /home/ansible
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Install controller public key
+      ansible.builtin.authorized_key:
+        user: ansible
+        key: "{{ proxmox_ssh_public_key }}"
+        state: present
+
+    - name: Install sudo
+      ansible.builtin.apt:
+        name: sudo
+        state: present
+        update_cache: true
+
+    - name: Configure passwordless sudo
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/ansible
+        content: "ansible ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
