@@ -1,29 +1,83 @@
+
 ---
-- name: Install GitLab Runner prerequisites
+- name: Install GitLab Runner repository prerequisites
   ansible.builtin.apt:
     name:
       - ca-certificates
       - curl
+      - gnupg
     state: present
     update_cache: true
 
-- name: Download GitLab Runner package
+- name: Create APT keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download GitLab Runner repository signing key
   ansible.builtin.get_url:
-    url: "{{ gitlab_runner_install_url }}"
-    dest: /tmp/gitlab-runner.deb
-    mode: '0644'
+    url: https://packages.gitlab.com/runner/gitlab-runner/gpgkey
+    dest: /etc/apt/keyrings/gitlab-runner.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure official GitLab Runner repository
+  ansible.builtin.deb822_repository:
+    name: gitlab-runner
+    types:
+      - deb
+    uris: https://packages.gitlab.com/runner/gitlab-runner/debian/
+    suites: bookworm
+    components:
+      - main
+    signed_by: /etc/apt/keyrings/gitlab-runner.asc
+    state: present
+    enabled: true
 
 - name: Install GitLab Runner
   ansible.builtin.apt:
-    deb: /tmp/gitlab-runner.deb
+    name: gitlab-runner
+    state: present
+    update_cache: true
 
-- name: Check runner registration
-  ansible.builtin.command: gitlab-runner verify --delete
-  register: gitlab_runner_verify
+- name: Install CI integration test tools
+  ansible.builtin.apt:
+    name: "{{ gitlab_runner_packages }}"
+    state: present
+    update_cache: true
+
+- name: Validate GitLab Runner authentication token
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_tokens.shell_01 is defined
+      - gitlab_runner_tokens.shell_01 | length > 0
+      - gitlab_runner_tokens.shell_01 is match('^glrt-')
+    fail_msg: "A valid GitLab Runner authentication token is required."
+  no_log: true
+
+- name: Check GitLab Runner configuration
+  ansible.builtin.stat:
+    path: "{{ gitlab_runner_config_path }}"
+  register: gitlab_runner_config
+
+- name: Check existing runner registration
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -Fq
+      - "{{ gitlab_runner_tokens.shell_01 }}"
+      - "{{ gitlab_runner_config_path }}"
+  register: gitlab_runner_registration
   changed_when: false
   failed_when: false
+  no_log: true
+  when: gitlab_runner_config.stat.exists
 
-- name: Register GitLab Runner
+- name: Register GitLab Group Runner
   ansible.builtin.command:
     argv:
       - gitlab-runner
@@ -32,26 +86,20 @@
       - --url
       - "{{ gitlab_url }}"
       - --token
-      - "{{ gitlab_runner_token }}"
+      - "{{ gitlab_runner_tokens.shell_01 }}"
       - --executor
       - "{{ gitlab_runner_executor }}"
       - --shell
       - "{{ gitlab_runner_shell }}"
-      - --description
+      - --name
       - "{{ gitlab_runner_description }}"
-      - --tag-list
-      - "{{ gitlab_runner_tags | join(',') }}"
-      - --run-untagged=false
-      - --locked=false
-      - --access-level
-      - not_protected
+  register: gitlab_runner_register_result
   no_log: true
-  when:
-    - gitlab_runner_token is defined
-    - gitlab_runner_token not in ['CHANGE_ME_IN_ANSIBLE_VAULT', '']
-    - gitlab_runner_verify.rc != 0
+  when: >
+    not gitlab_runner_config.stat.exists or
+    gitlab_runner_registration.rc | default(1) != 0
 
-- name: Enable GitLab Runner
+- name: Ensure GitLab Runner service is enabled and started
   ansible.builtin.service:
     name: gitlab-runner
     enabled: true

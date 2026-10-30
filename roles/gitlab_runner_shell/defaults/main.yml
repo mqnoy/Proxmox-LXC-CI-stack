@@ -1,5 +1,14 @@
 ---
-gitlab_runner_package_arch: amd64
-gitlab_runner_package_version: latest
-gitlab_runner_install_url: "https://gitlab-runner-downloads.s3.amazonaws.com/{{ gitlab_runner_package_version }}/deb/gitlab-runner_{{ gitlab_runner_package_arch }}.deb"
 gitlab_runner_config_path: /etc/gitlab-runner/config.toml
+
+gitlab_url: "https://gitlab.com"
+gitlab_runner_description: proxmox-lxc-shell-runner
+gitlab_runner_executor: shell
+gitlab_runner_shell: bash
+
+gitlab_runner_packages:
+  - git
+  - curl
+  - ca-certificates
+  - postgresql-client
+  - redis-tools
