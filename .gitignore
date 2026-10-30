@@ -4,7 +4,6 @@
 
 # Active inventory (contains private infrastructure details)
 inventory.yml
-inventory.yaml
 
 # Proxmox configuration (contains API details and private IPs)
 group_vars/proxmox.yml

@@ -18,13 +18,13 @@
     - valkey_ci
 
 - name: Configure GitLab shell runner
-  hosts: gitlab_runner
+  hosts: gitlab-runner-shell-01
   become: true
   roles:
     - gitlab_runner_shell
 
 - name: Configure rootless image build runner
-  hosts: build_runner
+  hosts: gitlab-runner-build-01
   become: true
   roles:
-    - build_runner
+    - gitlab_build_runner

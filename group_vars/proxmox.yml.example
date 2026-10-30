@@ -1,14 +1,12 @@
 ---
 # Copy to group_vars/proxmox.yml and keep it uncommitted.
-# Store proxmox_api_token_secret and container passwords in
-# group_vars/vault.yml via ansible-vault.
+# Store secrets in group_vars/all/vault.yml via ansible-vault.
 proxmox_api_host: 192.168.100.20
 proxmox_api_user: ansiblex@pve
 proxmox_api_token_id: lxc-provisioner
 proxmox_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
 proxmox_validate_certs: false
 proxmox_node: server-home
-proxmox_ssh_public_key: "ssh-ed25519 xxx"
 
 proxmox_lxc_containers:
   - vmid: 201
@@ -42,7 +40,7 @@ proxmox_lxc_containers:
     service_group: valkey_ci
 
   - vmid: 203
-    hostname: runner-ci
+    hostname: gitlab-runner-shell-01
     ostemplate: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
     storage: local-lvm
     disk_size: 16
@@ -54,10 +52,10 @@ proxmox_lxc_containers:
     netif:
       net0: name=eth0,bridge=vmbr0,ip=192.168.100.23/24,gw=192.168.100.1
     ssh_public_keys: "{{ proxmox_ssh_public_key }}"
-    service_group: gitlab_runner
+    service_group: gitlab_runner_shell
 
   - vmid: 204
-    hostname: runner-build
+    hostname: gitlab-runner-build-01
     ostemplate: local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst
     storage: local-lvm
     disk_size: 32
@@ -71,4 +69,4 @@ proxmox_lxc_containers:
     netif:
       net0: name=eth0,bridge=vmbr0,ip=192.168.100.24/24,gw=192.168.100.1
     ssh_public_keys: "{{ proxmox_ssh_public_key }}"
-    service_group: build_runner
+    service_group: gitlab_build_runner

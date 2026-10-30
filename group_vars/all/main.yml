@@ -1,0 +1,11 @@
+---
+ansible_user: ansible
+ansible_become: true
+ansible_python_interpreter: /usr/bin/python3
+
+ci_postgres_host: postgres-ci
+ci_postgres_port: 5432
+ci_valkey_host: valkey-ci
+ci_valkey_port: 6379
+
+proxmox_ssh_public_key: "{{ lookup('file', lookup('env', 'HOME') ~ '/.ssh/id_ed25519.pub') }}"

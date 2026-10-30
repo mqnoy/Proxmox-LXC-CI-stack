@@ -1,0 +1,13 @@
+gitlab_runners:
+  - name: gitlab-runner-shell-01
+    token: "{{ gitlab_runner_tokens.shell_01 }}"
+    executor: shell
+    tags:
+      - shell
+      - ci
+
+  - name: gitlab-runner-build-01
+    token: "{{ gitlab_runner_tokens.build_01 }}"
+    executor: shell
+    tags:
+      - container-build
