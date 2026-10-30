@@ -1,7 +1,41 @@
+
 ---
+- name: Ensure Ansible user exists
+  ansible.builtin.user:
+    name: ansible
+    home: /home/ansible
+    shell: /bin/bash
+    create_home: true
+    state: present
+
+- name: Create SSH directory for Ansible user
+  ansible.builtin.file:
+    path: /home/ansible/.ssh
+    state: directory
+    owner: ansible
+    group: ansible
+    mode: "0700"
+
+- name: Install Ansible controller public key
+  ansible.builtin.authorized_key:
+    user: ansible
+    key: "{{ proxmox_ssh_public_key }}"
+    state: present
+    manage_dir: false
+
+- name: Configure passwordless sudo for Ansible user
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/ansible
+    content: "ansible ALL=(ALL) NOPASSWD:ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+
 - name: Install shared packages
   ansible.builtin.apt:
     name:
+      - acl
       - ca-certificates
       - curl
       - git
