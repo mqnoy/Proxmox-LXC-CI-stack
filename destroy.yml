@@ -1,0 +1,48 @@
+
+---
+- name: Destroy declared Proxmox LXC containers
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars:
+    ansible_become: false
+    ansible_python_interpreter: "{{ playbook_dir }}/.venv/bin/python"
+
+  vars_files:
+    - group_vars/proxmox.yml
+    - group_vars/all/vault.yml
+
+  tasks:
+    - name: Stop LXC containers
+      ansible.builtin.uri:
+        url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ proxmox_node }}/lxc/{{ item.vmid }}/status/stop"
+        method: POST
+        headers:
+          Authorization: "PVEAPIToken={{ proxmox_api_user }}!{{ proxmox_api_token_id }}={{ proxmox_api_token_secret }}"
+        validate_certs: "{{ proxmox_validate_certs }}"
+        status_code: [200, 201]
+      loop: "{{ proxmox_lxc_containers }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      register: stop_result
+      failed_when: false
+      no_log: true
+
+    - name: Wait before destroying containers
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Destroy LXC containers
+      ansible.builtin.uri:
+        url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ proxmox_node }}/lxc/{{ item.vmid }}"
+        method: DELETE
+        headers:
+          Authorization: "PVEAPIToken={{ proxmox_api_user }}!{{ proxmox_api_token_id }}={{ proxmox_api_token_secret }}"
+        validate_certs: "{{ proxmox_validate_certs }}"
+        status_code: [200, 201]
+      loop: "{{ proxmox_lxc_containers }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+      no_log: true

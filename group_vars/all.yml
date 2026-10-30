@@ -1,9 +1,0 @@
----
-ci_postgres_database: jaringusahaqu
-ci_postgres_user: jaringusahaqu
-ci_postgres_password: CHANGE_ME_IN_ANSIBLE_VAULT
-ci_postgres_listen_address: "0.0.0.0"
-ci_valkey_listen_address: "0.0.0.0"
-gitlab_runner_executor: shell
-gitlab_runner_shell: bash
-build_runner_user: imagebuilder

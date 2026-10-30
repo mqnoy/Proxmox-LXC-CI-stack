@@ -3,11 +3,12 @@
 # Store proxmox_api_token_secret and container passwords in
 # group_vars/vault.yml via ansible-vault.
 proxmox_api_host: 192.168.100.20
-proxmox_api_user: ansible@pve
+proxmox_api_user: ansiblex@pve
 proxmox_api_token_id: lxc-provisioner
 proxmox_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
-proxmox_validate_certs: true
-proxmox_node: pve
+proxmox_validate_certs: false
+proxmox_node: server-home
+proxmox_ssh_public_key: "ssh-ed25519 xxx"
 
 proxmox_lxc_containers:
   - vmid: 201
@@ -22,7 +23,7 @@ proxmox_lxc_containers:
     password: "{{ vault_lxc_password }}"
     netif:
       net0: name=eth0,bridge=vmbr0,ip=192.168.100.21/24,gw=192.168.100.1
-    ssh_public_keys: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+    ssh_public_keys: "{{ proxmox_ssh_public_key }}"
     service_group: postgres_ci
 
   - vmid: 202
@@ -37,7 +38,7 @@ proxmox_lxc_containers:
     password: "{{ vault_lxc_password }}"
     netif:
       net0: name=eth0,bridge=vmbr0,ip=192.168.100.22/24,gw=192.168.100.1
-    ssh_public_keys: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+    ssh_public_keys: "{{ proxmox_ssh_public_key }}"
     service_group: valkey_ci
 
   - vmid: 203
@@ -52,7 +53,7 @@ proxmox_lxc_containers:
     password: "{{ vault_lxc_password }}"
     netif:
       net0: name=eth0,bridge=vmbr0,ip=192.168.100.23/24,gw=192.168.100.1
-    ssh_public_keys: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+    ssh_public_keys: "{{ proxmox_ssh_public_key }}"
     service_group: gitlab_runner
 
   - vmid: 204
@@ -69,5 +70,5 @@ proxmox_lxc_containers:
       - nesting=1
     netif:
       net0: name=eth0,bridge=vmbr0,ip=192.168.100.24/24,gw=192.168.100.1
-    ssh_public_keys: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+    ssh_public_keys: "{{ proxmox_ssh_public_key }}"
     service_group: build_runner

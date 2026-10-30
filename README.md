@@ -1,248 +1,678 @@
-# Proxmox LXC CI stack
+# Proxmox LXC CI Infrastructure
 
-An Ansible automation that provisions LXC containers on a remote Proxmox VE node through the Proxmox REST API, then configures CI/CD services inside those containers over SSH. The entire infrastructure — from container creation to service configuration — is declared in YAML and managed through two playbooks.
+Ansible automation for provisioning, configuring, and managing a CI infrastructure on Proxmox VE using Debian 12 LXC containers.
 
-## Architecture
+The project separates infrastructure provisioning from guest configuration and uses dedicated LXC containers for PostgreSQL, Valkey, GitLab Runner, and container image builds.
 
-### Execution flow
+## Table of Contents
 
-Three machines are involved. The **control machine** (your workstation) runs Ansible. The **Proxmox node** is a separate server running Proxmox VE. The **LXC containers** are guests created on that Proxmox node.
+- [1. Architecture Overview](#1-architecture-overview)
+- [2. Infrastructure](#2-infrastructure)
+- [3. Tested Environment](#3-tested-environment)
+- [4. Project Structure](#4-project-structure)
+- [5. How the Automation Works](#5-how-the-automation-works)
+- [6. Playbooks](#6-playbooks)
+- [7. Ansible Roles](#7-ansible-roles)
+- [8. Configuration Files](#8-configuration-files)
+- [9. Requirements](#9-requirements)
+- [10. Initial Setup](#10-initial-setup)
+- [11. Proxmox API Configuration](#11-proxmox-api-configuration)
+- [12. Deploy the Infrastructure](#12-deploy-the-infrastructure)
+- [13. Verify the Deployment](#13-verify-the-deployment)
+- [14. Destroy the Infrastructure](#14-destroy-the-infrastructure)
+- [15. Security Considerations](#15-security-considerations)
+- [16. Troubleshooting](#16-troubleshooting)
+- [17. Useful Commands](#17-useful-commands)
+- [18. References](#18-references)
 
-```
-                         ┌─────────────────────────┐
-                         │    Proxmox VE node       │
-                         │    (192.168.100.20)      │
-                         │                           │
- ┌──────────────┐  HTTP  │  ┌───────────────────┐   │
- │   Control    │ ──────►│  │  Proxmox API :8006 │   │
- │   machine    │  API   │  └───────────────────┘   │
- │              │        │                           │
- │  proxmox.yml │        │  ┌─────────┐ ┌─────────┐ │
- │  site.yml    │  SSH   │  │ LXC 201 │ │ LXC 202 │ │
- │              │ ──────►│  │postgres │ │ valkey  │ │
- └──────────────┘        │  └─────────┘ └─────────┘ │
-                         │  ┌─────────┐ ┌─────────┐ │
-                         │  │ LXC 203 │ │ LXC 204 │ │
-                         │  │runner-ci│ │runner-  │ │
-                         │  │         │ │  build  │ │
-                         │  └─────────┘ └─────────┘ │
-                         └─────────────────────────┘
-```
+## 1. Architecture Overview
 
-The workflow runs in two stages:
+The infrastructure consists of four Debian 12 LXC containers:
 
-1. **`proxmox.yml`** — Runs on the control machine (`hosts: localhost`, `connection: local`). The `proxmox_lxc` role sends HTTP requests to the Proxmox API on the remote node to create and start each declared container. No SSH connection to the Proxmox node or to any container is needed at this stage.
+| Container | Hostname | IP Address | Purpose |
+|---|---|---|---|
+| PostgreSQL CI | `postgres-ci` | `192.168.100.21` | CI database service |
+| Valkey CI | `valkey-ci` | `192.168.100.22` | CI cache and in-memory data store |
+| GitLab Runner | `runner-ci` | `192.168.100.23` | GitLab Runner using Shell executor |
+| Build Runner | `runner-build` | `192.168.100.24` | Container image builds using rootless Buildah/Podman |
 
-2. **`site.yml`** — Connects to each running container over SSH using the addresses from `inventory.yml`. Applies configuration roles based on inventory group membership:
+### Architecture Diagram
 
-   | Inventory group | Role applied | Container |
-   |---|---|---|
-   | `all` | `common` | All four containers |
-   | `postgres_ci` | `postgres_ci` | `postgres-ci` (192.168.100.21) |
-   | `valkey_ci` | `valkey_ci` | `valkey-ci` (192.168.100.22) |
-   | `gitlab_runner` | `gitlab_runner_shell` | `runner-ci` (192.168.100.23) |
-   | `build_runner` | `build_runner` | `runner-build` (192.168.100.24) |
+```text
+                       ┌──────────────────────┐
+                       │    Control Machine   │
+                       │                      │
+                       │       Ansible        │
+                       └──────────┬───────────┘
+                                  │
+                         HTTPS / REST API
+                                  │
+                                  ▼
+                       ┌──────────────────────┐
+                       │      Proxmox VE      │
+                       │     server-home      │
+                       │   192.168.100.20     │
+                       └──────────┬───────────┘
+                                  │
+              ┌───────────────────┼───────────────────┐
+              │                   │                   │
+              ▼                   ▼                   ▼
+     ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
+     │ postgres-ci    │  │ valkey-ci      │  │ runner-ci      │
+     │ 192.168.100.21 │  │ 192.168.100.22 │  │ 192.168.100.23 │
+     │                │  │                │  │                │
+     │ PostgreSQL     │  │ Valkey         │  │ GitLab Runner  │
+     └────────────────┘  └────────────────┘  └────────────────┘
 
-No Docker socket, Docker daemon, or Docker-in-Docker is used anywhere.
-
-### Directory structure
-
-```
-.
-├── proxmox.yml                          # Stage 1: provision LXC via Proxmox API
-├── site.yml                             # Stage 2: configure services inside LXC
-├── requirements.yml                     # Ansible Galaxy collection dependencies
-├── inventory.example.yml                # Inventory template (copy to inventory.yml)
-├── .gitignore                           # Excludes inventory.yml, vault, proxmox.yml
-├── group_vars/
-│   ├── all.yml                          # Shared variables loaded for all hosts
-│   └── proxmox.yml.example              # Proxmox API and container declarations template
-└── roles/
-    ├── proxmox_lxc/                     # Provision containers via Proxmox API
-    │   └── tasks/main.yml
-    ├── common/                          # Base OS packages and time sync
-    │   └── tasks/main.yml
-    ├── postgres_ci/                     # PostgreSQL database server
-    │   ├── tasks/main.yml
-    │   └── handlers/main.yml
-    ├── valkey_ci/                       # Valkey cache server
-    │   ├── tasks/main.yml
-    │   └── handlers/main.yml
-    ├── gitlab_runner_shell/             # GitLab Runner (shell executor)
-    │   ├── tasks/main.yml
-    │   ├── handlers/main.yml
-    │   ├── defaults/main.yml
-    │   └── templates/config.toml.j2
-    └── build_runner/                    # Rootless Buildah/Podman image builder
-        ├── tasks/main.yml
-        └── defaults/main.yml
+                                  ┌────────────────┐
+                                  │ runner-build   │
+                                  │ 192.168.100.24 │
+                                  │                │
+                                  │ Buildah/Podman │
+                                  └────────────────┘
 ```
 
-### File details
+### Design Principles
 
-#### Playbooks
+- Infrastructure provisioning is managed through the Proxmox API.
+- Guest operating system configuration is managed through SSH.
+- Each service runs in its own LXC container.
+- Sensitive credentials are encrypted using Ansible Vault.
+- Rootless Buildah/Podman is used instead of Docker-in-Docker.
+- Provisioning and destruction are separated into different playbooks.
+- Proxmox operations use the `community.proxmox.proxmox` Ansible module.
 
-- **`proxmox.yml`** — The provisioning playbook. Targets `localhost` because the `community.proxmox.proxmox` module runs locally and communicates with the remote Proxmox API over HTTPS. It loads variables from `group_vars/proxmox.yml` (API credentials and the container list) and applies the `proxmox_lxc` role.
+## 2. Infrastructure
 
-- **`site.yml`** — The configuration playbook. Contains five plays, each targeting a different inventory group (`all`, `postgres_ci`, `valkey_ci`, `gitlab_runner`, `build_runner`). Every play uses `become: true` for root-level package installation and service management on the remote containers.
-
-#### Variable files
-
-- **`group_vars/all.yml`** — Variables available to every host in the inventory. Contains the CI PostgreSQL database name (`jaringusahaqu`), database user, listen addresses for PostgreSQL and Valkey (`0.0.0.0`), the GitLab Runner executor type (`shell`), shell type (`bash`), and the image builder username (`imagebuilder`). Sensitive values like `ci_postgres_password` should reference Ansible Vault variables.
-
-- **`group_vars/proxmox.yml.example`** — Template for Proxmox-specific variables. Contains the API endpoint (`proxmox_api_host`), API user and token ID, TLS verification flag, Proxmox node name, and the `proxmox_lxc_containers` list. Each container entry declares its VM ID, hostname, OS template path, storage backend, disk size, CPU cores, memory, swap, network interface configuration, SSH public key, and an optional `features` list. Copy this to `group_vars/proxmox.yml` and customize; it is excluded from Git via `.gitignore`.
-
-- **`group_vars/vault.yml`** (user-created, encrypted) — Stores secrets used by both playbooks: `vault_proxmox_api_token_secret`, `vault_lxc_password`, `gitlab_runner_token`, and `ci_postgres_password`.
-
-#### Inventory
-
-- **`inventory.example.yml`** — Defines four inventory groups matching the plays in `site.yml`. Each group contains one host with a static IP on the `192.168.100.0/24` bridge subnet. Also sets shared connection variables (`ansible_user: ansible`, `ansible_become: true`) and service discovery variables (PostgreSQL/Valkey hostnames and ports, GitLab URL, runner description and tags).
-
-#### Dependencies
-
-- **`requirements.yml`** — Lists two Ansible Galaxy collections: `community.postgresql` (used by the `postgres_ci` role to manage databases and users) and `community.proxmox` (used by the `proxmox_lxc` role to create containers via the API).
-
-### Roles
-
-#### `proxmox_lxc` — Container provisioning
-
-Runs on the control machine. Three tasks:
-
-1. **Validate** — Asserts that every item in `proxmox_lxc_containers` has the required fields (`vmid`, `hostname`, `ostemplate`, `netif`). Fails early with a descriptive message if any are missing.
-2. **Create or update** — Calls `community.proxmox.proxmox` with `state: present` for each container. Configures disk, CPU, memory, swap, network, SSH keys, unprivileged mode, and optional LXC features (e.g., `nesting=1` for the build runner). Uses `no_log: true` to prevent API tokens and passwords from appearing in Ansible output.
-3. **Start** — Calls `community.proxmox.proxmox` with `state: started` for each container. Also uses `no_log: true`.
-
-#### `common` — Base OS setup
-
-Runs on all containers. Installs essential packages (`ca-certificates`, `curl`, `git`, `gnupg`, `jq`, `python3`, `python3-apt`, `unzip`) and enables `systemd-timesyncd` for time synchronization.
-
-#### `postgres_ci` — PostgreSQL CI database
-
-Runs on the `postgres_ci` group. Installs PostgreSQL 16, configures `listen_addresses` to the private bridge interface (default `0.0.0.0`), creates the CI database and user with the vault-encrypted password, and verifies readiness with `pg_isready`. The handler restarts PostgreSQL when the listen address configuration changes.
-
-#### `valkey_ci` — Valkey CI cache
-
-Runs on the `valkey_ci` group. Installs the `valkey-server` package, binds the listener to the configured private address, enables the service, and verifies connectivity with `valkey-cli ping`. The handler restarts Valkey when the bind address changes.
-
-#### `gitlab_runner_shell` — GitLab Runner
-
-Runs on the `gitlab_runner` group. Downloads the GitLab Runner `.deb` package from the official S3 URL (architecture and version are configurable via defaults), installs it, checks for existing registration with `gitlab-runner verify`, and registers a new runner if no valid registration exists. Registration uses the shell executor, the configured tags (default: `lxc-shell`), and the vault-encrypted runner token. The `config.toml.j2` template sets `concurrent = 1` and disables caching. The handler enables and starts the `gitlab-runner` service.
-
-#### `build_runner` — Rootless image builder
-
-Runs on the `build_runner` group. Installs container image tooling (`buildah`, `podman`, `fuse-overlayfs`, `uidmap`, `slirp4netns`, `ca-certificates`, `git`), creates a dedicated `imagebuilder` user, configures subordinate UID/GID ranges in `/etc/subuid` and `/etc/subgid` (default: `100000:65536`), and verifies that both `buildah info` and `podman info` run successfully under the unprivileged user. This container requires `nesting=1` in its LXC features to support user namespaces.
-
-## Requirements
-
-Install Ansible Galaxy collections on the control machine:
-
-```bash
-ansible-galaxy collection install -r requirements.yml
-```
-
-The control machine needs:
-
-- **HTTPS access to the Proxmox API** (port 8006) on the Proxmox VE node for container provisioning.
-- **SSH access to each LXC container** after provisioning for service configuration.
-
-Each LXC container needs Python 3, `sudo`, and Debian/Ubuntu package repositories. The LXC bridge network must provide:
-
-- Outbound HTTPS to `gitlab.com` (or your self-hosted GitLab instance) for runner registration and CI jobs.
-- Private connectivity from the runner containers to the PostgreSQL and Valkey containers on the same bridge subnet.
-
-## Quick start
-
-### 1. Create a Proxmox API token
-
-In the Proxmox web UI (Datacenter → Permissions → Users / API Tokens), create a dedicated user and API token. Assign the minimum required permissions:
-
-| Permission | Purpose |
+| Property | Value |
 |---|---|
-| `VM.Allocate` | Create new containers |
-| `VM.Config.*` | Set CPU, memory, disk, network |
-| `VM.PowerMgmt` | Start and stop containers |
-| `Datastore.AllocateSpace` | Allocate disk storage |
-| `Datastore.Audit` | List available storage |
-| `Sys.Audit` | Query node status |
+| Hypervisor | Proxmox VE |
+| Proxmox Version | 8.4.14 |
+| Proxmox Node | `server-home` |
+| Proxmox API | `192.168.100.20:8006` |
+| Container OS | Debian 12 |
+| Container Type | LXC |
+| Container Network | `vmbr0` |
+| Network Gateway | `192.168.100.1` |
+| Storage | `local-lvm` |
+| Automation | Ansible |
+| Provisioning API | Proxmox REST API |
 
-### 2. Configure Proxmox variables
+### Container Resources
+
+| Container | VMID | vCPU | RAM | Swap | Disk |
+|---|---:|---:|---:|---:|---:|
+| postgres-ci | 201 | 2 | 2048 MB | 512 MB | 16 GB |
+| valkey-ci | 202 | 1 | 1024 MB | 512 MB | 8 GB |
+| runner-ci | 203 | 2 | 2048 MB | 512 MB | 16 GB |
+| runner-build | 204 | 2 | 4096 MB | 1024 MB | 32 GB |
+
+All containers use unprivileged LXC configuration. The build runner additionally enables nesting where required.
+
+## 3. Tested Environment
+
+The project is developed and tested with the following software versions:
+
+| Component | Version |
+|---|---|
+| Proxmox VE | 8.4.14 |
+| Ansible Core | 2.21.1 |
+| Ansible Proxmox Collection | 1.6.0 |
+| Python (Project Virtual Environment) | 3.12.13 |
+| Python (Ansible Runtime) | 3.13.14 |
+| Jinja2 | 3.1.6 |
+| PyYAML | 6.0.3 |
+| Container OS | Debian 12 |
+
+### Python Environment
+
+The project uses a Python virtual environment with Python 3.12.13 for project dependencies.
+
+Ansible Core is installed through the system package environment and currently runs with Python 3.13.14.
+
+The project and Ansible runtime Python interpreters are separate.
+
+**Note:** These are the versions used during development and testing. Other versions may work but have not necessarily been tested.
+
+## 4. Project Structure
+
+```text
+.
+├── .gitignore
+├── README.md
+├── ansible.cfg
+├── inventory.example.yml
+├── requirements.yml
+├── proxmox.yml
+├── site.yml
+├── destroy.yml
+│
+├── group_vars/
+│   ├── proxmox.yml.example
+│   └── all/
+│       └── vault.yml
+│
+└── roles/
+    ├── common/
+    │   └── tasks/
+    │       └── main.yml
+    │
+    ├── proxmox_lxc/
+    │   └── tasks/
+    │       └── main.yml
+    │
+    ├── postgres_ci/
+    │   ├── tasks/
+    │   │   └── main.yml
+    │   └── handlers/
+    │       └── main.yml
+    │
+    ├── valkey_ci/
+    │   ├── tasks/
+    │   │   └── main.yml
+    │   └── handlers/
+    │       └── main.yml
+    │
+    ├── gitlab_runner_shell/
+    │   ├── defaults/
+    │   │   └── main.yml
+    │   ├── tasks/
+    │   │   └── main.yml
+    │   ├── handlers/
+    │   │   └── main.yml
+    │   └── templates/
+    │       └── config.toml.j2
+    │
+    └── build_runner/
+        ├── defaults/
+        │   └── main.yml
+        └── tasks/
+            └── main.yml
+```
+
+**Local files excluded from Git:**
+
+- `inventory.yml`
+- `group_vars/proxmox.yml`
+- `group_vars/all/vault.yml`
+- `.venv/`
+
+These files contain environment-specific configuration or sensitive information.
+
+## 5. How the Automation Works
+
+The automation is divided into two main stages.
+
+### Stage 1: Infrastructure Provisioning
+
+The `proxmox.yml` playbook runs on the Ansible control machine.
+
+It uses the Proxmox API to:
+
+1. Validate LXC container declarations.
+2. Create or update the declared containers.
+3. Configure container resources and networking.
+4. Configure SSH public key authentication.
+5. Start the containers.
+
+### Stage 2: Guest Configuration
+
+The `site.yml` playbook connects to the containers through SSH.
+
+It performs:
+
+1. Common operating system configuration.
+2. PostgreSQL installation and configuration.
+3. Valkey installation and configuration.
+4. GitLab Runner installation and configuration.
+5. Rootless Buildah/Podman installation and configuration.
+
+### Destruction
+
+The `destroy.yml` playbook uses the Proxmox Ansible module to:
+
+1. Stop the declared LXC containers.
+2. Remove the declared LXC containers.
+
+Only containers listed in `proxmox_lxc_containers` are targeted.
+
+## 6. Playbooks
+
+| Playbook | Description | Execution |
+|---|---|---|
+| `proxmox.yml` | Provision and start LXC containers | Local |
+| `site.yml` | Configure services inside containers | SSH |
+| `destroy.yml` | Stop and delete declared LXC containers | Local |
+
+### Proxmox Provisioning
 
 ```bash
-cp group_vars/proxmox.yml.example group_vars/proxmox.yml
+ansible-playbook -i inventory.yml proxmox.yml --ask-vault-pass
 ```
 
-Edit `group_vars/proxmox.yml` and set:
-
-- `proxmox_api_host` — the FQDN or IP of your Proxmox node.
-- `proxmox_node` — the Proxmox node name (as shown in the Proxmox UI).
-- Each container's `ostemplate`, `storage`, `disk_size`, `cores`, `memory`, network bridge, and static IP.
-
-### 3. Create vault secrets
+### Guest Configuration
 
 ```bash
-ansible-vault create group_vars/vault.yml
+ansible-playbook -i inventory.yml site.yml --ask-vault-pass
 ```
 
-Contents:
-
-```yaml
-vault_proxmox_api_token_secret: <token-secret>
-vault_lxc_password: <container-root-password>
-gitlab_runner_token: <protected-runner-token>
-ci_postgres_password: <database-password>
-```
-
-### 4. Provision LXC containers
+### Destroy Infrastructure
 
 ```bash
-ansible-playbook proxmox.yml --ask-vault-pass
+ansible-playbook -i inventory.yml destroy.yml --ask-vault-pass
 ```
 
-This creates and starts all four containers on the Proxmox node via the API. No SSH is involved.
+**Warning:** The destroy playbook permanently deletes the declared LXC containers and their associated virtual disks. Verify the VMIDs and configuration before execution.
 
-### 5. Configure inventory
+## 7. Ansible Roles
+
+### common
+
+Provides common operating system configuration for all containers.
+
+Typical responsibilities include:
+
+- Package updates.
+- Base utilities.
+- Common system settings.
+
+### proxmox_lxc
+
+Manages LXC lifecycle through `community.proxmox.proxmox`.
+
+Responsibilities:
+
+- Validate container declarations.
+- Create or update LXC containers.
+- Configure CPU, memory, swap, storage, and networking.
+- Configure SSH public keys.
+- Start containers.
+
+### postgres_ci
+
+Installs and configures PostgreSQL for CI workloads.
+
+### valkey_ci
+
+Installs and configures Valkey as an in-memory data store.
+
+### gitlab_runner_shell
+
+Installs GitLab Runner and configures the Shell executor.
+
+The runner configuration is generated from an Ansible Jinja2 template.
+
+### build_runner
+
+Installs and configures Buildah/Podman for rootless container image builds.
+
+The design avoids requiring a Docker daemon, Docker socket, or Docker-in-Docker.
+
+## 8. Configuration Files
+
+### inventory.yml
+
+Defines the managed LXC hosts and their connection settings.
+
+Create it from the example:
 
 ```bash
 cp inventory.example.yml inventory.yml
 ```
 
-Verify that the IP addresses in `inventory.yml` match the static IPs assigned in `group_vars/proxmox.yml`. Ensure SSH access works:
+The inventory should contain the four container hosts and their corresponding groups.
+
+### group_vars/proxmox.yml
+
+Contains Proxmox API settings and LXC declarations.
+
+Create it from the example:
 
 ```bash
-ansible -i inventory.yml all -m ping
+cp group_vars/proxmox.yml.example group_vars/proxmox.yml
 ```
 
-### 6. Configure services
+Important variables:
 
-Dry-run first, then apply:
+| Variable | Description |
+|---|---|
+| `proxmox_api_host` | Proxmox API hostname or IP |
+| `proxmox_api_user` | Proxmox API user |
+| `proxmox_api_token_id` | API token ID |
+| `proxmox_api_token_secret` | API token secret from Vault |
+| `proxmox_validate_certs` | TLS certificate validation |
+| `proxmox_node` | Target Proxmox node |
+| `proxmox_lxc_containers` | LXC container declarations |
+
+### group_vars/all/vault.yml
+
+Contains encrypted credentials.
+
+Expected variables include:
+
+```yaml
+vault_proxmox_api_token_secret: "YOUR_PROXMOX_TOKEN_SECRET"
+vault_lxc_password: "YOUR_LXC_PASSWORD"
+
+gitlab_runner_token: "YOUR_GITLAB_RUNNER_TOKEN"
+ci_postgres_password: "YOUR_POSTGRES_PASSWORD"
+```
+
+The actual values must be encrypted with Ansible Vault.
+
+## 9. Requirements
+
+### Control Machine
+
+- Linux
+- Python 3.12.13 for the project virtual environment
+- Ansible Core 2.21.1
+- Proxmoxer
+- Community Proxmox collection 1.6.0
+- Community PostgreSQL collection
+
+### Proxmox VE
+
+- Proxmox VE 8.4.14.
+- Proxmox API access.
+- Debian 12 LXC template.
+- `local-lvm` storage.
+- `vmbr0` network bridge.
+- API token with sufficient permissions.
+- Network connectivity between the control machine and Proxmox.
+
+## 10. Initial Setup
+
+### 10.1 Clone the Repository
 
 ```bash
-ansible-playbook -i inventory.yml site.yml --check --diff --ask-vault-pass
-ansible-playbook -i inventory.yml site.yml --ask-become-pass --ask-vault-pass
+git clone github.com/mqnoy/Proxmox-LXC-CI-stack
+cd Proxmox-LXC-CI-stack
 ```
 
-## Security
+### 10.2 Create Python Virtual Environment
 
-- **Never commit** `inventory.yml`, `group_vars/proxmox.yml`, or `group_vars/vault.yml` to Git. They are excluded via `.gitignore`.
-- **Use `ansible-vault`** for all sensitive values: API token secrets, container passwords, runner tokens, database passwords.
-- **Scope API token permissions** to the minimum listed above. Avoid granting `Sys.Admin` or root-level access.
-- **Restrict database listeners**: PostgreSQL and Valkey bind to `0.0.0.0` by default. Use Proxmox firewall rules or iptables inside the containers to limit access to the runner subnet only.
-- **Rootless containers**: All four containers run unprivileged (`unprivileged: true`). The build runner additionally requires `nesting=1` in its LXC features for user namespace support. Never grant LXC containers access to the Proxmox host filesystem.
-- **`no_log: true`**: The `proxmox_lxc` role suppresses task output on API calls to prevent tokens and passwords from appearing in terminal logs.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
 
-## GitLab Runner notes
+### 10.3 Install Ansible Dependencies
 
-- The runner registers with the **shell executor**, meaning CI jobs run directly on the container OS (no Docker isolation).
-- Default tags: `lxc-shell`. Jobs in `.gitlab-ci.yml` must reference this tag.
-- The shell executor does not support `image:` or `services:` directives in `.gitlab-ci.yml`.
-- Mark runners as **protected** in GitLab if they access production secrets or deploy artifacts.
-- `concurrent = 1` in `config.toml` — only one job runs at a time. Increase this if the container has sufficient resources.
+```bash
+pip install --upgrade pip
+pip install ansible-core==2.21.1 proxmoxer
+```
 
-## References
+Install the required Ansible collections:
 
-- [community.proxmox collection](https://docs.ansible.com/ansible/latest/collections/community/proxmox/index.html) — Collection index and module list.
-- [community.proxmox.proxmox module (LXC)](https://docs.ansible.com/ansible/devel/collections/community/proxmox/proxmox_module.html) — Module parameters for container management.
-- [Proxmox VE API](https://pve.proxmox.com/wiki/Proxmox_VE_API) — REST API overview, authentication methods, and endpoint reference.
-- [Proxmox User Management & API Tokens](https://pve.proxmox.com/pve-docs/chapter-pveum.html) — How to create users, API tokens, and assign permissions.
-- [Ansible Vault](https://docs.ansible.com/ansible/latest/vault_guide/index.html) — Encrypting sensitive data in playbooks and variable files.
-- [Ansible Inventory](https://docs.ansible.com/ansible/latest/inventory_guide/intro_inventory.html) — Inventory file format, groups, and host variables.
+```bash
+ansible-galaxy collection install -r requirements.yml
+```
+
+### 10.4 Create Local Configuration Files
+
+```bash
+cp inventory.example.yml inventory.yml
+cp group_vars/proxmox.yml.example group_vars/proxmox.yml
+```
+
+Edit both files according to your environment.
+
+### 10.5 Create Ansible Vault
+
+Create the Vault directory if it does not exist:
+
+```bash
+mkdir -p group_vars/all
+```
+
+Create the encrypted Vault file:
+
+```bash
+ansible-vault create group_vars/all/vault.yml
+```
+
+Add the required credentials.
+
+To edit the Vault later:
+
+```bash
+ansible-vault edit group_vars/all/vault.yml
+```
+
+## 11. Proxmox API Configuration
+
+Create a dedicated API user and API token for Ansible automation.
+
+The token requires appropriate permissions for the operations performed by the playbooks.
+
+Typical permissions include:
+
+- VM allocation and auditing.
+- VM configuration.
+- VM power management.
+- Datastore allocation and auditing.
+- System auditing.
+
+The required privileges should be scoped to the appropriate Proxmox resources rather than granting unnecessary administrative access.
+
+The API token configuration in `group_vars/proxmox.yml` should use:
+
+```yaml
+proxmox_api_user: ansiblex@pve
+proxmox_api_token_id: lxc-provisioner
+proxmox_api_token_secret: "{{ vault_proxmox_api_token_secret }}"
+```
+
+The token ID is only `lxc-provisioner`, not the full `user@realm!tokenid` string.
+
+For a private lab using a self-signed certificate, certificate validation may be disabled:
+
+```yaml
+proxmox_validate_certs: false
+```
+
+For production environments, use a trusted certificate and enable validation.
+
+## 12. Deploy the Infrastructure
+
+### 12.1 Validate Inventory
+
+```bash
+ansible-inventory -i inventory.yml --graph
+```
+
+### 12.2 Test SSH Connectivity
+
+```bash
+ansible all -i inventory.yml -m ping
+```
+
+### 12.3 Provision LXC Containers
+
+```bash
+ansible-playbook -i inventory.yml proxmox.yml --ask-vault-pass
+```
+
+### 12.4 Configure Services
+
+After the containers are running and reachable:
+
+```bash
+ansible-playbook -i inventory.yml site.yml --ask-vault-pass
+```
+
+## 13. Verify the Deployment
+
+### PostgreSQL
+
+```bash
+ansible postgres_ci -i inventory.yml -m shell \
+  -a "systemctl status postgresql"
+```
+
+### Valkey
+
+```bash
+ansible valkey_ci -i inventory.yml -m shell \
+  -a "systemctl status valkey-server"
+```
+
+### GitLab Runner
+
+```bash
+ansible gitlab_runner -i inventory.yml -m shell \
+  -a "gitlab-runner status"
+```
+
+### Build Runner
+
+```bash
+ansible build_runner -i inventory.yml -m shell \
+  -a "podman info"
+```
+
+The exact service names and verification commands should match the installed packages and role configuration.
+
+## 14. Destroy the Infrastructure
+
+The `destroy.yml` playbook removes the containers declared in `proxmox_lxc_containers`.
+
+Run:
+
+```bash
+ansible-playbook -i inventory.yml destroy.yml --ask-vault-pass
+```
+
+Before execution:
+
+1. Verify the Proxmox node.
+2. Verify the VMIDs.
+3. Confirm that the containers are managed by this project.
+4. Ensure that important data has been backed up.
+
+The playbook does not target arbitrary containers outside the declared list.
+
+## 15. Security Considerations
+
+- Never commit `inventory.yml`.
+- Never commit `group_vars/proxmox.yml`.
+- Never commit `group_vars/all/vault.yml`.
+- Use Ansible Vault for sensitive credentials.
+- Use a dedicated Proxmox API account and token.
+- Grant only the permissions required by the automation.
+- Prefer trusted TLS certificates in production.
+- Use unprivileged LXC containers.
+- Use rootless Buildah/Podman for container image builds.
+- Review the VMID declarations before running the destroy playbook.
+
+## 16. Troubleshooting
+
+### Proxmox API Authentication Failed
+
+Verify:
+
+- API username.
+- API token ID.
+- API token secret.
+- Token permissions.
+- Proxmox API connectivity on port `8006`.
+
+### LXC Creation Failed
+
+Verify:
+
+- Debian 12 template exists.
+- Storage is available.
+- VMIDs are not already assigned to unrelated resources.
+- Network bridge exists.
+- API token has sufficient permissions.
+
+### SSH Connection Failed
+
+Verify:
+
+- Containers are running.
+- IP addresses are correct.
+- SSH service is available.
+- The public key was installed correctly.
+- The inventory uses the correct SSH username.
+
+### Ansible Vault Error
+
+Verify that the Vault file exists:
+
+```bash
+ls -l group_vars/all/vault.yml
+```
+
+Run playbooks with:
+
+```bash
+--ask-vault-pass
+```
+
+### Missing Ansible Collection
+
+Install dependencies again:
+
+```bash
+ansible-galaxy collection install -r requirements.yml
+```
+
+## 17. Useful Commands
+
+Check Ansible version:
+
+```bash
+ansible --version
+```
+
+Check Python version:
+
+```bash
+python3 --version
+```
+
+List inventory:
+
+```bash
+ansible-inventory -i inventory.yml --graph
+```
+
+Check syntax:
+
+```bash
+ansible-playbook -i inventory.yml proxmox.yml --syntax-check
+ansible-playbook -i inventory.yml site.yml --syntax-check
+ansible-playbook -i inventory.yml destroy.yml --syntax-check
+```
+
+List available tasks:
+
+```bash
+ansible-playbook -i inventory.yml site.yml --list-tasks
+```
+
+Check Vault file:
+
+```bash
+ansible-vault view group_vars/all/vault.yml
+```
+
+## 18. References
+
+- Proxmox VE Documentation: https://pve.proxmox.com/pve-docs/
+- Ansible Documentation: https://docs.ansible.com/
+- Community Proxmox Collection: https://docs.ansible.com/ansible/latest/collections/community/proxmox/
+- Ansible Vault: https://docs.ansible.com/ansible/latest/vault_guide/index.html
+- GitLab Runner Documentation: https://docs.gitlab.com/runner/
+- PostgreSQL Documentation: https://www.postgresql.org/docs/
+- Valkey Documentation: https://valkey.io/
+- Podman Documentation: https://docs.podman.io/
+- Buildah Documentation: https://buildah.io/
+
+---
+
+**Note:** This README describes the intended project architecture. Actual package versions, service names, inventory groups, and role behavior should remain consistent with the Ansible configuration in the repository.

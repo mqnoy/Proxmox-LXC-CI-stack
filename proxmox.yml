@@ -3,5 +3,15 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  become: false
+
+  vars:
+    ansible_become: false
+    ansible_python_interpreter: "{{ playbook_dir }}/.venv/bin/python"
+
+  vars_files:
+    - group_vars/proxmox.yml
+    - group_vars/all/vault.yml
+
   roles:
     - proxmox_lxc

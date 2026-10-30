@@ -1,3 +1,57 @@
+# ==========================================
+# Ansible local configuration and secrets
+# ==========================================
+
+# Active inventory (contains private infrastructure details)
 inventory.yml
+inventory.yaml
+
+# Proxmox configuration (contains API details and private IPs)
 group_vars/proxmox.yml
+
+# Ansible Vault files
+group_vars/all/vault.yml
 group_vars/vault.yml
+*.vault
+
+# ==========================================
+# Python virtual environment
+# ==========================================
+
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ==========================================
+# Ansible temporary files and logs
+# ==========================================
+
+*.retry
+*.log
+ansible.log
+
+# ==========================================
+# SSH private keys and credentials
+# ==========================================
+
+*.pem
+*.key
+id_rsa
+id_ed25519
+id_ecdsa
+.ssh/
+
+# ==========================================
+# Editor and operating system files
+# ==========================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

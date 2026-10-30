@@ -10,6 +10,8 @@
   loop: "{{ proxmox_lxc_containers }}"
   loop_control:
     label: "{{ item.hostname | default(item.vmid | default('unknown')) }}"
+  become: false
+  no_log: true
 
 - name: Create or update Proxmox LXC containers
   community.proxmox.proxmox:
@@ -22,8 +24,7 @@
     vmid: "{{ item.vmid }}"
     hostname: "{{ item.hostname }}"
     ostemplate: "{{ item.ostemplate }}"
-    storage: "{{ item.storage }}"
-    disk: "{{ item.disk_size }}"
+    disk: "{{ item.storage }}:{{ item.disk_size }}"
     cores: "{{ item.cores }}"
     memory: "{{ item.memory }}"
     swap: "{{ item.swap }}"
@@ -35,7 +36,8 @@
     state: present
   loop: "{{ proxmox_lxc_containers }}"
   loop_control:
-    label: "{{ item.vmid }} {{ item.hostname }}"
+    label: "{{ item.hostname | default(item.vmid | default('unknown')) }}"
+  become: false
   no_log: true
 
 - name: Start Proxmox LXC containers
@@ -46,9 +48,10 @@
     api_token_secret: "{{ proxmox_api_token_secret }}"
     validate_certs: "{{ proxmox_validate_certs }}"
     node: "{{ proxmox_node }}"
-    vmid: "{{ item.vmid }}"
+    vmid: "{{ item.vmid | int }}"
     state: started
   loop: "{{ proxmox_lxc_containers }}"
   loop_control:
-    label: "{{ item.vmid }} {{ item.hostname }}"
+    label: "{{ item.hostname }}"
+  become: false
   no_log: true
