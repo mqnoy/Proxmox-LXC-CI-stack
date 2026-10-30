@@ -1,0 +1,119 @@
+build-and-push-arm64:
+  stage: build
+  tags:
+    - container-build
+  rules:
+  - when: never
+  script:
+    - |
+      set -eu
+
+      IMAGE="${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}"
+
+      echo "Logging in to GitLab Container Registry..."
+      buildah login \
+        -u "${CI_REGISTRY_USER}" \
+        -p "${CI_REGISTRY_PASSWORD}" \
+        "${CI_REGISTRY}"
+
+      echo "Building ARM64 image..."
+      buildah bud \
+        --network=none \
+        --platform linux/arm64 \
+        --build-arg TARGETOS=linux \
+        --build-arg TARGETARCH=arm64 \
+        -t "${IMAGE}" .
+
+      echo "Pushing ARM64 image..."
+      buildah push "${IMAGE}"
+
+      echo "Image pushed: ${IMAGE}"
+
+verify-image-architecture:
+  stage: test
+  tags:
+    - container-build
+  needs:
+    - build-and-push-arm64
+  rules:
+  - when: never
+  script:
+    - |
+      set -eu
+
+      IMAGE="${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}"
+
+      buildah login \
+        -u "${CI_REGISTRY_USER}" \
+        -p "${CI_REGISTRY_PASSWORD}" \
+        "${CI_REGISTRY}"
+
+      echo "Inspecting image architecture..."
+      buildah manifest inspect "${IMAGE}" || \
+        buildah inspect --type image "${IMAGE}"
+
+test-shell-runner:
+  stage: test
+  tags:
+    - shell
+  rules:
+  - when: never
+  script:
+    - echo "Testing Shell Runner"
+    - hostname
+    - whoami
+    - id
+    - uname -m
+    - git --version
+    - echo "Shell Runner OK"
+    - pg_isready -h 192.168.100.21 -p 5432 -t 5
+
+test-infrastructure-connectivity:
+  stage: test
+  tags:
+    - shell
+  script:
+    - |
+      set -eu
+
+      echo "=================================="
+      echo "Testing PostgreSQL connectivity"
+      echo "=================================="
+
+      pg_isready \
+        -h "$CI_POSTGRES_HOST" \
+        -p "$CI_POSTGRES_PORT" \
+        -t 5
+
+      PGPASSWORD="$CI_POSTGRES_PASSWORD" \
+      psql \
+        -h "$CI_POSTGRES_HOST" \
+        -p "$CI_POSTGRES_PORT" \
+        -U "$CI_POSTGRES_USER" \
+        -d "$CI_POSTGRES_DB" \
+        -v ON_ERROR_STOP=1 \
+        -c "SELECT 1 AS postgres_connection_test;"
+
+      echo "PostgreSQL authentication: OK"
+
+      echo "=================================="
+      echo "Testing Valkey connectivity"
+      echo "=================================="
+
+      export REDISCLI_AUTH="$CI_VALKEY_PASSWORD"
+
+      VALKEY_RESULT=$(
+        redis-cli \
+          -h "$CI_VALKEY_HOST" \
+          -p "$CI_VALKEY_PORT" \
+          PING
+      )
+
+      test "$VALKEY_RESULT" = "PONG"
+
+      echo "Valkey authentication: OK"
+
+      unset REDISCLI_AUTH
+      echo "=================================="
+      echo "All infrastructure tests passed"
+      echo "=================================="
