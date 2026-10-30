@@ -33,8 +33,8 @@ The infrastructure consists of four Debian 12 LXC containers:
 |---|---|---|---|
 | PostgreSQL CI | `postgres-ci` | `192.168.100.21` | CI database service |
 | Valkey CI | `valkey-ci` | `192.168.100.22` | CI cache and in-memory data store |
-| GitLab Runner | `runner-ci` | `192.168.100.23` | GitLab Runner using Shell executor |
-| Build Runner | `runner-build` | `192.168.100.24` | Container image builds using rootless Buildah/Podman |
+| GitLab Runner | `gitlab-runner-shell-01` | `192.168.100.23` | GitLab Runner using Shell executor |
+| Build Runner | `gitlab-runner-build-01` | `192.168.100.24` | Container image builds using rootless Buildah/Podman |
 
 ### Architecture Diagram
 
@@ -57,19 +57,19 @@ The infrastructure consists of four Debian 12 LXC containers:
               ┌───────────────────┼───────────────────┐
               │                   │                   │
               ▼                   ▼                   ▼
-     ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
-     │ postgres-ci    │  │ valkey-ci      │  │ runner-ci      │
-     │ 192.168.100.21 │  │ 192.168.100.22 │  │ 192.168.100.23 │
-     │                │  │                │  │                │
-     │ PostgreSQL     │  │ Valkey         │  │ GitLab Runner  │
-     └────────────────┘  └────────────────┘  └────────────────┘
+     ┌────────────────┐  ┌────────────────┐  ┌────────────────────────┐
+     │ postgres-ci    │  │ valkey-ci      │  │ gitlab-runner-shell-01 │
+     │ 192.168.100.21 │  │ 192.168.100.22 │  │ 192.168.100.23         │
+     │                │  │                │  │                        │
+     │ PostgreSQL 17  │  │ Valkey 9.1     │  │ GitLab Shell Runner    │
+     └────────────────┘  └────────────────┘  └────────────────────────┘
 
-                                  ┌────────────────┐
-                                  │ runner-build   │
-                                  │ 192.168.100.24 │
-                                  │                │
-                                  │ Buildah/Podman │
-                                  └────────────────┘
+                                  ┌────────────────────────┐
+                                  │ gitlab-runner-build-01 │
+                                  │ 192.168.100.24         │
+                                  │                        │
+                                  │ Buildah / Podman       │
+                                  └────────────────────────┘
 ```
 
 ### Design Principles
@@ -104,8 +104,8 @@ The infrastructure consists of four Debian 12 LXC containers:
 |---|---:|---:|---:|---:|---:|
 | postgres-ci | 201 | 2 | 2048 MB | 512 MB | 16 GB |
 | valkey-ci | 202 | 1 | 1024 MB | 512 MB | 8 GB |
-| runner-ci | 203 | 2 | 2048 MB | 512 MB | 16 GB |
-| runner-build | 204 | 2 | 4096 MB | 1024 MB | 32 GB |
+| gitlab-runner-shell-01 | 203 | 2 | 2048 MB | 512 MB | 16 GB |
+| gitlab-runner-build-01 | 204 | 2 | 4096 MB | 1024 MB | 32 GB |
 
 All containers use unprivileged LXC configuration. The build runner additionally enables nesting where required.
 
@@ -141,15 +141,28 @@ The project and Ansible runtime Python interpreters are separate.
 ├── .gitignore
 ├── README.md
 ├── ansible.cfg
+├── bootstrap.yml
+├── inventory.bootstrap.yml
 ├── inventory.example.yml
 ├── requirements.yml
 ├── proxmox.yml
 ├── site.yml
 ├── destroy.yml
 │
+├── example/
+│   ├── .gitlab-ci.yml
+│   ├── Dockerfile
+│   ├── go.mod
+│   ├── REPORT.md
+│   └── cmd/
+│       └── api/
+│           └── main.go
+│
 ├── group_vars/
 │   ├── proxmox.yml.example
 │   └── all/
+│       ├── gitlab_runners.yml
+│       ├── main.yml
 │       └── vault.yml
 │
 └── roles/
@@ -162,12 +175,16 @@ The project and Ansible runtime Python interpreters are separate.
     │       └── main.yml
     │
     ├── postgres_ci/
+    │   ├── defaults/
+    │   │   └── main.yml
     │   ├── tasks/
     │   │   └── main.yml
     │   └── handlers/
     │       └── main.yml
     │
     ├── valkey_ci/
+    │   ├── defaults/
+    │   │   └── main.yml
     │   ├── tasks/
     │   │   └── main.yml
     │   └── handlers/
@@ -183,10 +200,12 @@ The project and Ansible runtime Python interpreters are separate.
     │   └── templates/
     │       └── config.toml.j2
     │
-    └── build_runner/
+    └── gitlab_build_runner/
         ├── defaults/
         │   └── main.yml
-        └── tasks/
+        ├── tasks/
+        │   └── main.yml
+        └── handlers/
             └── main.yml
 ```
 
@@ -221,11 +240,11 @@ The `site.yml` playbook connects to the containers through SSH.
 
 It performs:
 
-1. Common operating system configuration.
-2. PostgreSQL installation and configuration.
-3. Valkey installation and configuration.
-4. GitLab Runner installation and configuration.
-5. Rootless Buildah/Podman installation and configuration.
+1. Common operating system configuration (creates the `ansible` user, SSH key authorization, passwordless sudo, base packages, and python3-venv).
+2. PostgreSQL 17 installation from PGDG with SCRAM-SHA-256 authentication, listen address binding, and database/user provisioning.
+3. Valkey 9.1 installation via Percona APT repository, systemd LXC namespace overrides, private network binding, and strong authentication.
+4. GitLab Shell Runner installation and registration via modern `glrt-...` tokens, including CI test client tools (`postgresql-client`, `redis-tools`).
+5. Rootless Buildah/Podman installation and configuration under a dedicated `imagebuilder` user (subuid/subgid mapping, `cgroupfs` manager), with a dedicated GitLab Build Runner service.
 
 ### Destruction
 
@@ -236,18 +255,34 @@ The `destroy.yml` playbook uses the Proxmox Ansible module to:
 
 Only containers listed in `proxmox_lxc_containers` are targeted.
 
+### Optional Bootstrap: Initial SSH and Sudo Access
+
+If newly provisioned LXC containers need initial Ansible management access configured (e.g., initial root SSH without the `ansible` user created yet), the `bootstrap.yml` playbook can be run using `inventory.bootstrap.yml`:
+
+1. Connects to fresh LXC containers via `root`.
+2. Creates the `ansible` user with home directory and bash shell.
+3. Deploys the controller's SSH public key to `/home/ansible/.ssh/authorized_keys`.
+4. Configures passwordless `sudo` privileges under `/etc/sudoers.d/ansible`.
+
 ## 6. Playbooks
 
 | Playbook | Description | Execution |
 |---|---|---|
 | `proxmox.yml` | Provision and start LXC containers | Local |
-| `site.yml` | Configure services inside containers | SSH |
+| `bootstrap.yml` | Bootstrap `ansible` user and passwordless sudo on fresh LXC | SSH (root) |
+| `site.yml` | Configure services inside containers | SSH (ansible) |
 | `destroy.yml` | Stop and delete declared LXC containers | Local |
 
 ### Proxmox Provisioning
 
 ```bash
 ansible-playbook -i inventory.yml proxmox.yml --ask-vault-pass
+```
+
+### Bootstrap Host Access (Optional)
+
+```bash
+ansible-playbook -i inventory.bootstrap.yml bootstrap.yml --ask-vault-pass
 ```
 
 ### Guest Configuration
@@ -268,13 +303,13 @@ ansible-playbook -i inventory.yml destroy.yml --ask-vault-pass
 
 ### common
 
-Provides common operating system configuration for all containers.
+Provides baseline OS configuration for all containers:
 
-Typical responsibilities include:
-
-- Package updates.
-- Base utilities.
-- Common system settings.
+- Ensures the `ansible` management user exists with proper shell and home directory.
+- Deploys the Ansible controller's public SSH key to `~ansible/.ssh/authorized_keys`.
+- Configures passwordless `sudo` privileges via `/etc/sudoers.d/ansible` (validated with `visudo`).
+- Installs base operational packages (`acl`, `ca-certificates`, `curl`, `git`, `gnupg`, `htop`, `jq`, `sudo`, `vim`).
+- Ensures `python3` and `python3-venv` are present for Ansible module execution.
 
 ### proxmox_lxc
 
@@ -290,23 +325,31 @@ Responsibilities:
 
 ### postgres_ci
 
-Installs and configures PostgreSQL for CI workloads.
+Installs PostgreSQL 17 from the official PostgreSQL APT repository (PGDG), configures listener and `pg_hba.conf` network permissions with SCRAM-SHA-256 authentication, installs `python3-psycopg2`, and manages CI databases, users, and privileges.
 
 ### valkey_ci
 
-Installs and configures Valkey as an in-memory data store.
+Installs Valkey 9.1 via the official Percona repository, applies systemd unit overrides relaxed for unprivileged LXC environments, configures network binding and password authentication, and verifies health via `valkey-cli ping`.
 
 ### gitlab_runner_shell
 
-Installs GitLab Runner and configures the Shell executor.
+Installs GitLab Runner from the official GitLab repository and registers a shell executor runner:
 
-The runner configuration is generated from an Ansible Jinja2 template.
+- Configures official GitLab APT deb822 repository with GPG keyring verification.
+- Installs `gitlab-runner` along with CI integration packages (`postgresql-client`, `redis-tools`, `git`, `curl`).
+- Validates the runner authentication token prefix (`glrt-...`) with secret masking (`no_log`).
+- Idempotently registers the runner with tags (`shell`, `ci`) and applies template-based runner concurrency settings.
 
-### build_runner
+### gitlab_build_runner
 
-Installs and configures Buildah/Podman for rootless container image builds.
+Configures an isolated rootless container build environment without requiring a Docker daemon, Docker socket, or Docker-in-Docker:
 
-The design avoids requiring a Docker daemon, Docker socket, or Docker-in-Docker.
+- Installs `buildah`, `podman`, `fuse-overlayfs`, `uidmap`, and `slirp4netns`.
+- Configures `/etc/containers/containers.conf` with `cgroup_manager = "cgroupfs"` optimized for unprivileged LXC nesting.
+- Provisions a dedicated unprivileged user (`imagebuilder`) with subordinate UID/GID allocations (`/etc/subuid`, `/etc/subgid`).
+- Sanitizes login shells (`.bash_logout`) to prevent pipeline interference.
+- Installs and registers GitLab Runner (`tag: container-build`) configured with a systemd service override to execute strictly as the `imagebuilder` user.
+- Verifies rootless container operations post-provisioning via `buildah info` and `podman info`.
 
 ## 8. Configuration Files
 
@@ -344,21 +387,62 @@ Important variables:
 | `proxmox_node` | Target Proxmox node |
 | `proxmox_lxc_containers` | LXC container declarations |
 
-### group_vars/all/vault.yml
+### group_vars/all/
 
-Contains encrypted credentials.
+Global variables are organized under `group_vars/all/`:
 
-Expected variables include:
+- `main.yml`: Shared network parameters, connection variables (`ansible_user`, `ansible_become`, `ansible_python_interpreter`), CI service ports/hosts, and public SSH keys.
+- `gitlab_runners.yml`: Runner definitions, tags, and executor mapping for GitLab Runners.
+- `vault.yml`: Encrypted credentials and secret tokens.
+
+Expected variables in `group_vars/all/vault.yml` include:
 
 ```yaml
 vault_proxmox_api_token_secret: "YOUR_PROXMOX_TOKEN_SECRET"
-vault_lxc_password: "YOUR_LXC_PASSWORD"
-
-gitlab_runner_token: "YOUR_GITLAB_RUNNER_TOKEN"
+vault_lxc_password: "YOUR_LXC_ROOT_PASSWORD"
 ci_postgres_password: "YOUR_POSTGRES_PASSWORD"
+ci_valkey_password: "YOUR_PASSWORD_32_CHAR_MINIMUM"
+gitlab_runner_tokens:
+  shell_01: "glrt-xxxxxxxxxxxxxxxxxxxx"
+  build_01: "glrt-xxxxxxxxxxxxxxxxxxxx"
 ```
 
 The actual values must be encrypted with Ansible Vault.
+
+### example/
+
+The `example/` directory contains an end-to-end sample application and GitLab CI/CD pipeline demonstrating both runner executors:
+
+1. **`example/.gitlab-ci.yml`**: Full CI pipeline configuration covering:
+   - Rootless multi-arch container image build (`linux/arm64`) using Buildah on `gitlab-runner-build-01` (`tag: container-build`).
+   - Image architecture inspection (`buildah manifest inspect`).
+   - Shell Runner basic diagnostics and PostgreSQL ping (`tag: shell`).
+   - Full infrastructure connectivity and authentication tests verifying PostgreSQL (`psql` query) and Valkey (`redis-cli PING` returning `PONG`) over the internal network.
+2. **`example/cmd/api/main.go` & `example/Dockerfile`**: A lightweight Go REST API (`/healthz`, `/hello`) built into a scratch container image using multi-stage builds.
+3. **`example/REPORT.md`**: Complete execution report and verification documentation of the infrastructure connectivity test pipeline run.
+
+Example pipeline testing both runner tags (`shell` and `ci`) on `gitlab-runner-shell-01`:
+
+```yaml
+stages:
+  - test
+
+test-runner:
+  stage: test
+  tags:
+    - shell
+  script:
+    - echo "Running on gitlab-runner-shell-01"
+    - hostname
+    - whoami
+
+test-ci:
+  stage: test
+  tags:
+    - ci
+  script:
+    - echo "CI job executed successfully"
+```
 
 ## 9. Requirements
 
@@ -495,7 +579,15 @@ ansible all -i inventory.yml -m ping
 ansible-playbook -i inventory.yml proxmox.yml --ask-vault-pass
 ```
 
-### 12.4 Configure Services
+### 12.4 Bootstrap Guest Access (Optional)
+
+If the containers are freshly spawned and need Ansible user and passwordless sudo set up:
+
+```bash
+ansible-playbook -i inventory.bootstrap.yml bootstrap.yml --ask-vault-pass
+```
+
+### 12.5 Configure Services
 
 After the containers are running and reachable:
 
@@ -516,21 +608,35 @@ ansible postgres_ci -i inventory.yml -m shell \
 
 ```bash
 ansible valkey_ci -i inventory.yml -m shell \
-  -a "systemctl status valkey-server"
+  -a "systemctl status valkey"
 ```
 
 ### GitLab Runner
 
 ```bash
-ansible gitlab_runner -i inventory.yml -m shell \
+ansible gitlab_runner_shell -i inventory.yml -m shell \
   -a "gitlab-runner status"
+```
+
+Verify shell executor integration tools:
+
+```bash
+ansible gitlab_runner_shell -i inventory.yml -m shell \
+  -a "psql --version && valkey-cli --version"
 ```
 
 ### Build Runner
 
 ```bash
-ansible build_runner -i inventory.yml -m shell \
-  -a "podman info"
+ansible gitlab_build_runner -i inventory.yml -m shell \
+  -a "gitlab-runner status"
+```
+
+Verify rootless container tools under the `imagebuilder` user:
+
+```bash
+ansible gitlab_build_runner -i inventory.yml -m command \
+  -a "su - imagebuilder -c 'podman info && buildah info'"
 ```
 
 The exact service names and verification commands should match the installed packages and role configuration.
