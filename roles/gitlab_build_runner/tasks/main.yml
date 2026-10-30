@@ -1,0 +1,200 @@
+---
+- name: Install rootless image build packages
+  ansible.builtin.apt:
+    name: "{{ build_runner_packages }}"
+    state: present
+    update_cache: true
+
+- name: Configure Podman and Buildah for LXC
+  ansible.builtin.copy:
+    dest: "{{ build_runner_containers_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [engine]
+      cgroup_manager = "cgroupfs"
+
+- name: Create image builder user
+  ansible.builtin.user:
+    name: "{{ build_runner_user }}"
+    create_home: true
+    shell: /bin/bash
+    groups:
+      - video
+    append: true
+
+- name: Configure non-interactive Bash logout
+  ansible.builtin.copy:
+    dest: "{{ build_runner_home }}/.bash_logout"
+    owner: "{{ build_runner_user }}"
+    group: "{{ build_runner_user }}"
+    mode: "0644"
+    content: |
+      # Managed by Ansible.
+      # Do not run clear_console in GitLab Runner login shells.
+
+- name: Configure subordinate UID range
+  ansible.builtin.lineinfile:
+    path: /etc/subuid
+    regexp: "^{{ build_runner_user }}:"
+    line: "{{ build_runner_user }}:{{ build_runner_subuid_start }}:{{ build_runner_subuid_count }}"
+    create: true
+
+- name: Configure subordinate GID range
+  ansible.builtin.lineinfile:
+    path: /etc/subgid
+    regexp: "^{{ build_runner_user }}:"
+    line: "{{ build_runner_user }}:{{ build_runner_subuid_start }}:{{ build_runner_subuid_count }}"
+    create: true
+
+- name: Install GitLab Runner repository prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+    update_cache: true
+
+- name: Create APT keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download GitLab Runner repository signing key
+  ansible.builtin.get_url:
+    url: https://packages.gitlab.com/runner/gitlab-runner/gpgkey
+    dest: /etc/apt/keyrings/gitlab-runner.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure official GitLab Runner repository
+  ansible.builtin.deb822_repository:
+    name: gitlab-runner
+    types:
+      - deb
+    uris: https://packages.gitlab.com/runner/gitlab-runner/debian/
+    suites: bookworm
+    components:
+      - main
+    signed_by: /etc/apt/keyrings/gitlab-runner.asc
+    state: present
+    enabled: true
+
+- name: Install GitLab Runner
+  ansible.builtin.apt:
+    name: gitlab-runner
+    state: present
+    update_cache: true
+
+- name: Add image builder to GitLab Runner group
+  ansible.builtin.user:
+    name: "{{ build_runner_user }}"
+    groups:
+      - video
+      - gitlab-runner
+    append: true
+
+- name: Ensure runner working directory exists
+  ansible.builtin.file:
+    path: "{{ build_runner_home }}"
+    state: directory
+    owner: "{{ build_runner_user }}"
+    group: "{{ build_runner_user }}"
+    mode: "0750"
+
+- name: Create GitLab Runner systemd override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/gitlab-runner.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure GitLab Runner build user
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/gitlab-runner.service.d/override.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/usr/bin/gitlab-runner run --config {{ build_runner_gitlab_config_path }} --working-directory {{ build_runner_home }} --service gitlab-runner --user {{ build_runner_user }}
+  notify: Restart GitLab Runner
+
+- name: Validate GitLab build runner token
+  ansible.builtin.assert:
+    that:
+      - build_runner_gitlab_token is defined
+      - build_runner_gitlab_token | length > 0
+      - build_runner_gitlab_token.startswith('glrt-')
+    fail_msg: GitLab build runner token is missing or invalid.
+  no_log: true
+
+- name: Check Build Runner configuration
+  ansible.builtin.stat:
+    path: "{{ build_runner_gitlab_config_path }}"
+  register: build_runner_config
+
+- name: Check existing Build Runner registration
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -Fq
+      - "{{ build_runner_gitlab_token }}"
+      - "{{ build_runner_gitlab_config_path }}"
+  register: build_runner_registration_check
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: build_runner_config.stat.exists
+
+- name: Register GitLab Group Runner
+  ansible.builtin.command:
+    argv:
+      - gitlab-runner
+      - register
+      - --non-interactive
+      - --url
+      - "{{ build_runner_gitlab_url }}"
+      - --token
+      - "{{ build_runner_gitlab_token }}"
+      - --executor
+      - "{{ build_runner_gitlab_executor }}"
+      - --shell
+      - "{{ build_runner_gitlab_shell }}"
+      - --name
+      - "{{ build_runner_gitlab_description }}"
+  register: build_runner_register_result
+  no_log: true
+  when: >
+    not build_runner_config.stat.exists or
+    build_runner_registration_check.rc | default(1) != 0
+
+- name: Ensure image builder can read runner configuration
+  ansible.builtin.file:
+    path: "{{ build_runner_gitlab_config_path }}"
+    owner: root
+    group: gitlab-runner
+    mode: "0640"
+
+- name: Apply GitLab Runner systemd configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify rootless Buildah
+  become_user: "{{ build_runner_user }}"
+  ansible.builtin.command: buildah info
+  register: buildah_info
+  changed_when: false
+
+- name: Verify rootless Podman
+  become_user: "{{ build_runner_user }}"
+  ansible.builtin.command: podman info
+  register: podman_info
+  changed_when: false

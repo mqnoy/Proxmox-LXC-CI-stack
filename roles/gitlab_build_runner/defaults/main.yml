@@ -1,0 +1,24 @@
+---
+build_runner_user: imagebuilder
+build_runner_home: "/home/{{ build_runner_user }}"
+
+build_runner_containers_conf_path: /etc/containers/containers.conf
+
+build_runner_subuid_start: 10000
+build_runner_subuid_count: 50000
+
+build_runner_packages:
+  - buildah
+  - podman
+  - fuse-overlayfs
+  - uidmap
+  - slirp4netns
+  - ca-certificates
+  - git
+
+build_runner_gitlab_url: "https://gitlab.com/"
+build_runner_gitlab_description: proxmox-lxc-build-runner
+build_runner_gitlab_token: "{{ gitlab_runner_tokens.build_01 }}"
+build_runner_gitlab_config_path: /etc/gitlab-runner/config.toml
+build_runner_gitlab_executor: shell
+build_runner_gitlab_shell: bash
