@@ -1,6 +1,6 @@
 
 ---
-- name: Destroy declared Proxmox LXC containers
+- name: Destroy selected Proxmox LXC containers
   hosts: localhost
   connection: local
   gather_facts: false
@@ -10,12 +10,33 @@
     ansible_become: false
     ansible_python_interpreter: "{{ playbook_dir }}/.venv/bin/python"
 
+    # example: -e '{"destroy_vmids":[205]}'
+    destroy_vmids: []
+
   vars_files:
     - group_vars/proxmox.yml
     - group_vars/all/vault.yml
 
   tasks:
-    - name: Stop LXC containers
+    - name: Validate destroy VMIDs
+      ansible.builtin.assert:
+        that:
+          - destroy_vmids | length > 0
+          - >
+            (destroy_vmids | map('int') | list)
+            | difference(
+                proxmox_lxc_containers
+                | map(attribute='vmid')
+                | map('int')
+                | list
+              )
+            | length == 0
+        fail_msg: >-
+          Specify valid VMIDs, for example:
+          -e 'destroy_vmids=[205]'
+      no_log: false
+
+    - name: Stop selected LXC containers
       ansible.builtin.uri:
         url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ proxmox_node }}/lxc/{{ item.vmid }}/status/stop"
         method: POST
@@ -25,16 +46,31 @@
         status_code: [200, 201]
       loop: "{{ proxmox_lxc_containers }}"
       loop_control:
-        label: "{{ item.hostname }}"
+        label: "{{ item.hostname }} (VMID {{ item.vmid }})"
+      when: (item.vmid | int) in (destroy_vmids | map('int') | list)
       register: stop_result
       failed_when: false
       no_log: true
 
-    - name: Wait before destroying containers
-      ansible.builtin.pause:
-        seconds: 5
+    - name: Wait until selected LXC containers are stopped
+      ansible.builtin.uri:
+        url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ proxmox_node }}/lxc/{{ item.vmid }}/status/current"
+        method: GET
+        headers:
+          Authorization: "PVEAPIToken={{ proxmox_api_user }}!{{ proxmox_api_token_id }}={{ proxmox_api_token_secret }}"
+        validate_certs: "{{ proxmox_validate_certs }}"
+        status_code: [200]
+      loop: "{{ proxmox_lxc_containers }}"
+      loop_control:
+        label: "{{ item.hostname }} (VMID {{ item.vmid }})"
+      when: (item.vmid | int) in (destroy_vmids | map('int') | list)
+      register: lxc_status
+      until: lxc_status.json.data.status == "stopped"
+      retries: 30
+      delay: 2
+      no_log: true
 
-    - name: Destroy LXC containers
+    - name: Destroy selected LXC containers
       ansible.builtin.uri:
         url: "https://{{ proxmox_api_host }}:8006/api2/json/nodes/{{ proxmox_node }}/lxc/{{ item.vmid }}"
         method: DELETE
@@ -44,5 +80,6 @@
         status_code: [200, 201]
       loop: "{{ proxmox_lxc_containers }}"
       loop_control:
-        label: "{{ item.hostname }}"
+        label: "{{ item.hostname }} (VMID {{ item.vmid }})"
+      when: (item.vmid | int) in (destroy_vmids | map('int') | list)
       no_log: true
