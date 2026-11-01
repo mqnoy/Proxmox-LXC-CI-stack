@@ -2,7 +2,7 @@
 
 Ansible automation for provisioning, configuring, and managing a CI infrastructure on Proxmox VE using Debian 12 LXC containers.
 
-The project separates infrastructure provisioning from guest configuration and uses dedicated LXC containers for PostgreSQL, Valkey, GitLab Runner, and container image builds.
+The project separates infrastructure provisioning from guest configuration and uses dedicated LXC containers for PostgreSQL, Valkey, Mailpit (SMTP/email testing), GitLab Runner, and container image builds.
 
 ## Table of Contents
 
@@ -27,7 +27,7 @@ The project separates infrastructure provisioning from guest configuration and u
 
 ## 1. Architecture Overview
 
-The infrastructure consists of four Debian 12 LXC containers:
+The infrastructure consists of five Debian 12 LXC containers:
 
 | Container | Hostname | IP Address | Purpose |
 |---|---|---|---|
@@ -35,7 +35,7 @@ The infrastructure consists of four Debian 12 LXC containers:
 | Valkey CI | `valkey-ci` | `192.168.100.22` | CI cache and in-memory data store |
 | GitLab Runner | `gitlab-runner-shell-01` | `192.168.100.23` | GitLab Runner using Shell executor |
 | Build Runner | `gitlab-runner-build-01` | `192.168.100.24` | Container image builds using rootless Buildah/Podman |
-
+| Mailpit CI | `mailpit-ci` | `192.168.100.25` | CI email testing and fake SMTP service |
 ### Architecture Diagram
 
 ```text
@@ -54,22 +54,27 @@ The infrastructure consists of four Debian 12 LXC containers:
                        │   192.168.100.20     │
                        └──────────┬───────────┘
                                   │
-              ┌───────────────────┼───────────────────┐
-              │                   │                   │
-              ▼                   ▼                   ▼
-     ┌────────────────┐  ┌────────────────┐  ┌────────────────────────┐
-     │ postgres-ci    │  │ valkey-ci      │  │ gitlab-runner-shell-01 │
-     │ 192.168.100.21 │  │ 192.168.100.22 │  │ 192.168.100.23         │
-     │                │  │                │  │                        │
-     │ PostgreSQL 17  │  │ Valkey 9.1     │  │ GitLab Shell Runner    │
-     └────────────────┘  └────────────────┘  └────────────────────────┘
-
-                                  ┌────────────────────────┐
-                                  │ gitlab-runner-build-01 │
-                                  │ 192.168.100.24         │
-                                  │                        │
-                                  │ Buildah / Podman       │
-                                  └────────────────────────┘
+       ┌──────────────────────────┼──────────────────────────┐
+       │                          │                          │
+       ▼                          ▼                          ▼
+┌────────────────┐       ┌────────────────┐       ┌────────────────┐
+│ postgres-ci    │       │ valkey-ci      │       │ mailpit-ci     │
+│ 192.168.100.21 │       │ 192.168.100.22 │       │ 192.168.100.25 │
+│                │       │                │       │                │
+│ PostgreSQL 17  │       │ Valkey 9.1     │       │ Mailpit 1.27.4 │
+└────────────────┘       └────────────────┘       └────────────────┘
+       │                                                     │
+       └──────────────────────────┬──────────────────────────┘
+                                  │
+              ┌───────────────────┴───────────────────┐
+              │                                       │
+              ▼                                       ▼
+     ┌────────────────────────┐      ┌────────────────────────┐
+     │ gitlab-runner-shell-01 │      │ gitlab-runner-build-01 │
+     │ 192.168.100.23         │      │ 192.168.100.24         │
+     │                        │      │                        │
+     │ GitLab Shell Runner    │      │ Buildah / Podman       │
+     └────────────────────────┘      └────────────────────────┘
 ```
 
 ### Design Principles
@@ -106,7 +111,7 @@ The infrastructure consists of four Debian 12 LXC containers:
 | valkey-ci | 202 | 1 | 1024 MB | 512 MB | 8 GB |
 | gitlab-runner-shell-01 | 203 | 2 | 2048 MB | 512 MB | 16 GB |
 | gitlab-runner-build-01 | 204 | 2 | 4096 MB | 1024 MB | 32 GB |
-
+| mailpit-ci | 205 | 1 | 512 MB | 512 MB | 8 GB |
 All containers use unprivileged LXC configuration. The build runner additionally enables nesting where required.
 
 ## 3. Tested Environment
@@ -200,13 +205,24 @@ The project and Ansible runtime Python interpreters are separate.
     │   └── templates/
     │       └── config.toml.j2
     │
-    └── gitlab_build_runner/
+    ├── gitlab_build_runner/
+    │   ├── defaults/
+    │   └── main.yml
+    │   ├── tasks/
+    │   └── main.yml
+    │   └── handlers/
+    │       └── main.yml
+    │
+    └── mailpit_ci/
         ├── defaults/
         │   └── main.yml
         ├── tasks/
         │   └── main.yml
-        └── handlers/
-            └── main.yml
+        ├── handlers/
+        │   └── main.yml
+        └── templates/
+            ├── mailpit.env.j2
+            └── mailpit.service.j2
 ```
 
 **Local files excluded from Git:**
@@ -245,15 +261,17 @@ It performs:
 3. Valkey 9.1 installation via Percona APT repository, systemd LXC namespace overrides, private network binding, and strong authentication.
 4. GitLab Shell Runner installation and registration via modern `glrt-...` tokens, including CI test client tools (`postgresql-client`, `redis-tools`).
 5. Rootless Buildah/Podman installation and configuration under a dedicated `imagebuilder` user (subuid/subgid mapping, `cgroupfs` manager), with a dedicated GitLab Build Runner service.
+6. Mailpit 1.27.4 installation via official binary release, hardened systemd service, private network binding, and HTTP UI / SMTP authentication.
 
 ### Destruction
 
-The `destroy.yml` playbook uses the Proxmox Ansible module to:
+The `destroy.yml` playbook uses the Proxmox REST API to:
 
-1. Stop the declared LXC containers.
-2. Remove the declared LXC containers.
+1. Validate the specified target VMIDs (`destroy_vmids`).
+2. Stop the selected LXC containers and wait until they reach the `stopped` status.
+3. Remove the selected LXC containers.
 
-Only containers listed in `proxmox_lxc_containers` are targeted.
+Only containers explicitly targeted via `destroy_vmids` and present in `proxmox_lxc_containers` are destroyed.
 
 ### Optional Bootstrap: Initial SSH and Sudo Access
 
@@ -351,6 +369,16 @@ Configures an isolated rootless container build environment without requiring a 
 - Installs and registers GitLab Runner (`tag: container-build`) configured with a systemd service override to execute strictly as the `imagebuilder` user.
 - Verifies rootless container operations post-provisioning via `buildah info` and `podman info`.
 
+### mailpit_ci
+
+Installs Mailpit 1.27.4 as a lightweight email and fake SMTP testing service for CI pipelines:
+
+- Creates dedicated system user and group (`mailpit`) with isolated home directory `/var/lib/mailpit`.
+- Downloads and extracts official release binary directly to `/usr/local/bin/mailpit`.
+- Configures `/etc/mailpit/mailpit.env` with HTTP Web UI and SMTP basic authentication credentials.
+- Configures a hardened systemd service (`NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, `ReadWritePaths=/var/lib/mailpit`).
+- Binds SMTP on port `1025` and HTTP Web UI on port `8025`.
+- Validates service availability post-deployment via authenticated HTTP endpoint check.
 ## 8. Configuration Files
 
 ### inventory.yml
@@ -363,7 +391,7 @@ Create it from the example:
 cp inventory.example.yml inventory.yml
 ```
 
-The inventory should contain the four container hosts and their corresponding groups.
+The inventory should contain the five container hosts and their corresponding groups (`postgres_ci`, `valkey_ci`, `gitlab_runner_shell`, `gitlab_build_runner`, `mailpit_ci`).
 
 ### group_vars/proxmox.yml
 
@@ -405,6 +433,12 @@ ci_valkey_password: "YOUR_PASSWORD_32_CHAR_MINIMUM"
 gitlab_runner_tokens:
   shell_01: "glrt-xxxxxxxxxxxxxxxxxxxx"
   build_01: "glrt-xxxxxxxxxxxxxxxxxxxx"
+
+vault_mailpit_ui_username: mailpit-admin
+vault_mailpit_ui_password: "YOUR_PASS"
+
+vault_mailpit_smtp_username: mailpit-smtp
+vault_mailpit_smtp_password: "YOUR_PASS"
 ```
 
 The actual values must be encrypted with Ansible Vault.
@@ -418,6 +452,7 @@ The `example/` directory contains an end-to-end sample application and GitLab CI
    - Image architecture inspection (`buildah manifest inspect`).
    - Shell Runner basic diagnostics and PostgreSQL ping (`tag: shell`).
    - Full infrastructure connectivity and authentication tests verifying PostgreSQL (`psql` query) and Valkey (`redis-cli PING` returning `PONG`) over the internal network.
+   - Mailpit connectivity and SMTP authentication test (`mailpit-connectivity` job) verifying email delivery over the internal network using Python `smtplib`.
 2. **`example/cmd/api/main.go` & `example/Dockerfile`**: A lightweight Go REST API (`/healthz`, `/hello`) built into a scratch container image using multi-stage builds.
 3. **`example/REPORT.md`**: Complete execution report and verification documentation of the infrastructure connectivity test pipeline run.
 
@@ -639,18 +674,35 @@ ansible gitlab_build_runner -i inventory.yml -m command \
   -a "su - imagebuilder -c 'podman info && buildah info'"
 ```
 
+### Mailpit
+
+```bash
+ansible mailpit_ci -i inventory.yml -m shell \
+  -a "systemctl status mailpit"
+```
+
+Verify HTTP UI endpoint and authentication:
+
+```bash
+ansible mailpit_ci -i inventory.yml -m shell \
+  -a "curl -s -u mailpit-admin:YOUR_PASS http://192.168.100.25:8025/api/v1/info"
+```
+
 The exact service names and verification commands should match the installed packages and role configuration.
 
 ## 14. Destroy the Infrastructure
 
-The `destroy.yml` playbook removes the containers declared in `proxmox_lxc_containers`.
+The `destroy.yml` playbook removes containers declared in `proxmox_lxc_containers` matching the requested VMIDs.
 
-Run:
+Run specifying target VMIDs:
 
 ```bash
-ansible-playbook -i inventory.yml destroy.yml --ask-vault-pass
-```
+# Destroy a specific container (e.g., Mailpit CI VMID 205)
+ansible-playbook -i inventory.yml destroy.yml -e '{"destroy_vmids":[205]}' --ask-vault-pass
 
+# Destroy all managed CI containers
+ansible-playbook -i inventory.yml destroy.yml -e '{"destroy_vmids":[201, 202, 203, 204, 205]}' --ask-vault-pass
+```
 Before execution:
 
 1. Verify the Proxmox node.
@@ -778,7 +830,7 @@ ansible-vault view group_vars/all/vault.yml
 - Valkey Documentation: https://valkey.io/
 - Podman Documentation: https://docs.podman.io/
 - Buildah Documentation: https://buildah.io/
-
+- Mailpit Documentation: https://mailpit.axllent.org/
 ---
 
 **Note:** This README describes the intended project architecture. Actual package versions, service names, inventory groups, and role behavior should remain consistent with the Ansible configuration in the repository.

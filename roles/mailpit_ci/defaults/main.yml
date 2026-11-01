@@ -1,0 +1,17 @@
+
+---
+ci_mailpit_version: "1.27.4"
+ci_mailpit_host: "192.168.100.25"
+ci_mailpit_smtp_port: 1025
+ci_mailpit_ui_port: 8025
+
+ci_mailpit_user: mailpit
+ci_mailpit_group: mailpit
+ci_mailpit_binary: /usr/local/bin/mailpit
+ci_mailpit_data_dir: /var/lib/mailpit
+
+ci_mailpit_ui_username: "{{ vault_mailpit_ui_username }}"
+ci_mailpit_ui_password: "{{ vault_mailpit_ui_password }}"
+
+ci_mailpit_smtp_username: "{{ vault_mailpit_smtp_username }}"
+ci_mailpit_smtp_password: "{{ vault_mailpit_smtp_password }}"

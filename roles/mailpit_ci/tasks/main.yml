@@ -1,0 +1,110 @@
+
+---
+- name: Install required packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - tar
+    state: present
+    update_cache: true
+
+- name: Create Mailpit group
+  ansible.builtin.group:
+    name: "{{ ci_mailpit_group }}"
+    system: true
+    state: present
+
+- name: Create Mailpit user
+  ansible.builtin.user:
+    name: "{{ ci_mailpit_user }}"
+    group: "{{ ci_mailpit_group }}"
+    system: true
+    home: "{{ ci_mailpit_data_dir }}"
+    create_home: true
+    shell: /usr/sbin/nologin
+    state: present
+
+- name: Create temporary download directory
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: mailpit
+  register: mailpit_download_dir
+  changed_when: true
+
+- name: Download Mailpit release archive
+  ansible.builtin.get_url:
+    url: "https://github.com/axllent/mailpit/releases/download/v{{ ci_mailpit_version }}/mailpit-linux-amd64.tar.gz"
+    dest: "{{ mailpit_download_dir.path }}/mailpit.tar.gz"
+    mode: "0644"
+
+- name: Extract Mailpit binary
+  ansible.builtin.unarchive:
+    src: "{{ mailpit_download_dir.path }}/mailpit.tar.gz"
+    dest: "{{ mailpit_download_dir.path }}"
+    remote_src: true
+
+- name: Install Mailpit binary
+  ansible.builtin.copy:
+    src: "{{ mailpit_download_dir.path }}/mailpit"
+    dest: "{{ ci_mailpit_binary }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart Mailpit
+
+- name: Remove temporary download directory
+  ansible.builtin.file:
+    path: "{{ mailpit_download_dir.path }}"
+    state: absent
+
+- name: Create Mailpit configuration directory
+  ansible.builtin.file:
+    path: /etc/mailpit
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install Mailpit environment configuration
+  ansible.builtin.template:
+    src: mailpit.env.j2
+    dest: /etc/mailpit/mailpit.env
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart Mailpit
+
+- name: Install Mailpit systemd service
+  ansible.builtin.template:
+    src: mailpit.service.j2
+    dest: /etc/systemd/system/mailpit.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Mailpit
+
+- name: Enable and start Mailpit
+  ansible.builtin.systemd:
+    name: mailpit
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Flush Mailpit handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: Check Mailpit HTTP endpoint
+  ansible.builtin.uri:
+    url: "http://{{ ci_mailpit_host }}:{{ ci_mailpit_ui_port }}/"
+    method: GET
+    url_username: "{{ ci_mailpit_ui_username }}"
+    url_password: "{{ ci_mailpit_ui_password }}"
+    force_basic_auth: true
+    status_code: 200
+  register: mailpit_http_check
+  retries: 10
+  delay: 2
+  until: mailpit_http_check.status == 200
+  no_log: true

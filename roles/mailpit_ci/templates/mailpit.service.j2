@@ -1,0 +1,22 @@
+[Service]
+Type=simple
+User={{ ci_mailpit_user }}
+Group={{ ci_mailpit_group }}
+WorkingDirectory={{ ci_mailpit_data_dir }}
+
+EnvironmentFile=/etc/mailpit/mailpit.env
+
+Environment=MP_SMTP_BIND_ADDR={{ ci_mailpit_host }}:{{ ci_mailpit_smtp_port }}
+Environment=MP_UI_BIND_ADDR={{ ci_mailpit_host }}:{{ ci_mailpit_ui_port }}
+Environment=MP_DATABASE={{ ci_mailpit_data_dir }}/mailpit.db
+
+ExecStart={{ ci_mailpit_binary }}
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ ci_mailpit_data_dir }}

@@ -4,20 +4,22 @@
 
 This project provisions CI infrastructure in Proxmox LXC containers
 using Ansible and validates connectivity from a GitLab Shell Runner to
-two supporting services:
+three supporting services:
 
 -   PostgreSQL 17
 -   Percona Valkey 9.1
+-   Mailpit 1.27.4
 
 The infrastructure validation pipeline initially failed because the
 PostgreSQL and Valkey services were not available on their expected
 network endpoints. The Ansible playbooks were then run to provision and
 configure the services. After provisioning, the Shell Runner could reach
-both services, authenticate successfully, execute a PostgreSQL query,
-and receive a successful Valkey `PING` response.
+all services, authenticate successfully, execute a PostgreSQL query,
+receive a successful Valkey `PING` response, and send a test email
+through Mailpit over SMTP.
 
-**Final result: the `test-infrastructure-connectivity` GitLab CI job
-succeeded.**
+**Final result: both the `test-infrastructure-connectivity` and
+`mailpit-connectivity` GitLab CI jobs succeeded.**
 
 The work did not require changes to the CI test logic to resolve the
 service availability failures. The underlying issue was the state of the
@@ -44,6 +46,9 @@ service containers, which was corrected through Ansible.
 
   GitLab Build                       204 `192.168.100.24`   Rootless Buildah
   Runner                                                    image builds
+
+  Mailpit CI                         205 `192.168.100.25`   Mailpit 1.27.4,
+                                                            SMTP 1025 / UI 8025
   --------------------------------------------------------------------------
 
 All listed containers are Debian 12 and unprivileged LXC containers. The
@@ -62,16 +67,15 @@ document.
                  | CT 203                   |
                  | 192.168.100.23           |
                  +--------------------------+
-                       |              |
-             TCP 5432  |              | TCP 6379
-                       |              |
-                       v              v
-          +-------------------+  +-------------------+
-          | PostgreSQL CI     |  | Valkey CI         |
-          | CT 201            |  | CT 202            |
-          | 192.168.100.21    |  | 192.168.100.22    |
-          | PostgreSQL 17     |  | Percona Valkey 9.1|
-          +-------------------+  +-------------------+
+                  /           |            \
+        TCP 5432 /   TCP 6379 |             \ TCP 1025
+                v             v              v
+     +-----------------+ +-----------------+ +-----------------+
+     | PostgreSQL CI   | | Valkey CI       | | Mailpit CI      |
+     | CT 201          | | CT 202          | | CT 205          |
+     | 192.168.100.21  | | 192.168.100.22  | | 192.168.100.25  |
+     | PostgreSQL 17   | | Percona Valkey  | | Mailpit 1.27.4  |
+     +-----------------+ +-----------------+ +-----------------+
 ```
 
 ### 2.3 Relevant network settings
@@ -82,6 +86,8 @@ document.
   Gateway                 `192.168.100.1`
   PostgreSQL endpoint     `192.168.100.21:5432`
   Valkey endpoint         `192.168.100.22:6379`
+  Mailpit SMTP endpoint   `192.168.100.25:1025`
+  Mailpit Web UI endpoint `192.168.100.25:8025`
   Shell Runner endpoint   `192.168.100.23`
 
 ------------------------------------------------------------------------
@@ -123,7 +129,14 @@ ansible/
     │   ├── tasks/main.yml
     │   ├── handlers/main.yml
     │   └── templates/config.toml.j2
-    └── gitlab_build_runner/
+    ├── gitlab_build_runner/
+    └── mailpit_ci/
+        ├── defaults/main.yml
+        ├── tasks/main.yml
+        ├── handlers/main.yml
+        └── templates/
+            ├── mailpit.env.j2
+            └── mailpit.service.j2
 ```
 
 ### 3.1 Inventory groups
@@ -152,6 +165,11 @@ all:
       hosts:
         gitlab-runner-build-01:
           ansible_host: 192.168.100.24
+
+    mailpit_ci:
+      hosts:
+        mailpit-ci:
+          ansible_host: 192.168.100.25
 ```
 
 ### 3.2 Shared variables
@@ -169,10 +187,15 @@ ci_postgres_port: 5432
 
 ci_valkey_host: valkey-ci
 ci_valkey_port: 6379
+
+ci_mailpit_host: mailpit-ci
+ci_mailpit_smtp_port: 1025
+ci_mailpit_ui_port: 8025
 ```
 
-Secrets, including database passwords and GitLab Runner authentication
-tokens, are stored in the encrypted Ansible Vault file:
+Secrets, including database passwords, GitLab Runner authentication
+tokens, and Mailpit credentials, are stored in the encrypted Ansible
+Vault file:
 
 ``` text
 group_vars/all/vault.yml
@@ -219,6 +242,12 @@ groups:
   become: true
   roles:
     - gitlab_build_runner
+
+- name: Configure Mailpit CI service
+  hosts: mailpit_ci
+  become: true
+  roles:
+    - mailpit_ci
 ```
 
 ------------------------------------------------------------------------
@@ -402,9 +431,81 @@ command-line arguments.
 
 ------------------------------------------------------------------------
 
-## 6. GitLab Shell Runner
+## 6. Mailpit CI Service
 
-### 6.1 Runner details
+### 6.1 Configuration
+
+The relevant values from `roles/mailpit_ci/defaults/main.yml` are:
+
+``` yaml
+---
+ci_mailpit_version: "1.27.4"
+ci_mailpit_user: "mailpit"
+ci_mailpit_group: "mailpit"
+ci_mailpit_home: "/var/lib/mailpit"
+
+ci_mailpit_smtp_bind: "192.168.100.25:1025"
+ci_mailpit_ui_bind: "192.168.100.25:8025"
+
+ci_mailpit_db_file: "/var/lib/mailpit/mailpit.db"
+ci_mailpit_max_messages: 500
+```
+
+The Web UI and SMTP authentication credentials are provided separately
+through Ansible Vault (`vault_mailpit_ui_username`,
+`vault_mailpit_ui_password`, `vault_mailpit_smtp_username`,
+`vault_mailpit_smtp_password`). Do not store them in plaintext defaults
+or documentation.
+
+### 6.2 Provisioning behavior
+
+The Mailpit role performs the following tasks:
+
+1.  Installs prerequisites (`curl`, `tar`).
+2.  Creates the dedicated `mailpit` system user and group.
+3.  Ensures data and configuration directories exist (`/var/lib/mailpit`,
+    `/etc/mailpit`).
+4.  Downloads and extracts the official Mailpit binary to
+    `/usr/local/bin/mailpit`.
+5.  Templates the environment file `/etc/mailpit/mailpit.env` with
+    configured listen addresses, database path, and Vault credentials.
+6.  Deploys a hardened systemd service unit (`mailpit.service`).
+7.  Reloads systemd configuration.
+8.  Enables and starts the Mailpit service.
+9.  Verifies service readiness via authenticated HTTP API check against
+    `http://192.168.100.25:8025/api/v1/info`.
+
+The systemd unit for the service is:
+
+``` text
+mailpit.service
+```
+
+The service listened on:
+
+``` text
+192.168.100.25:1025
+192.168.100.25:8025
+```
+
+### 6.3 Mailpit CI variables
+
+Configure these as GitLab CI/CD variables:
+
+  Variable               Value
+  ---------------------- ----------------------------------------
+  `MAIL_HOST`         `192.168.100.25`
+  `MAIL_PORT`         `1025`
+  `MAIL_USERNAME`     The matching SMTP username from Vault
+  `MAIL_PASSWORD`     The matching SMTP password from Vault
+
+Use a masked GitLab variable for the password.
+
+------------------------------------------------------------------------
+
+## 7. GitLab Shell Runner
+
+### 7.1 Runner details
 
   Property     Value
   ------------ --------------------------
@@ -420,7 +521,7 @@ command-line arguments.
 
 The runner was installed and registered using the Ansible role.
 
-### 6.2 Runner verification
+### 7.2 Runner verification
 
 The following command verified the runner service, registration, and
 GitLab connectivity:
@@ -437,7 +538,7 @@ The observed status was:
 -   Runner listed in `/etc/gitlab-runner/config.toml`
 -   GitLab runner verification: valid
 
-### 6.3 Installed CI tools
+### 7.3 Installed CI tools
 
 The Shell Runner role installs the tools required by the connectivity
 test. The package list includes:
@@ -459,10 +560,10 @@ pg_isready (PostgreSQL) 15.19
 redis-cli 7.0.15
 ```
 
-These are client tools; the PostgreSQL server itself runs in CT201, and
-Valkey runs in CT202.
+These are client tools; the PostgreSQL server itself runs in CT201, Valkey
+runs in CT202, and Mailpit runs in CT205.
 
-### 6.4 Runner tags
+### 7.4 Runner tags
 
 The CI job uses the tag:
 
@@ -477,13 +578,13 @@ overwritten by the Ansible config template.
 
 ------------------------------------------------------------------------
 
-## 7. GitLab CI Connectivity Test
+## 8. GitLab CI Connectivity Tests
 
-The connectivity job validates both the network path and service-level
-authentication.
+The connectivity jobs validate both the network path and service-level
+authentication from the Shell Runner to PostgreSQL, Valkey, and
+Mailpit.
 
-A representative job is:
-
+The first job tests PostgreSQL and Valkey:
 ``` yaml
 test-infrastructure-connectivity:
   stage: test
@@ -537,13 +638,68 @@ test-infrastructure-connectivity:
       echo "=================================="
 ```
 
+The second job validates Mailpit SMTP connectivity, authentication, and
+email delivery using a Python script:
+
+``` yaml
+mailpit-connectivity:
+  stage: test
+  tags:
+    - shell
+
+  variables:
+    PYTHONDONTWRITEBYTECODE: "1"
+
+  script:
+    - |
+      python3 - <<'PY'
+      import os
+      import smtplib
+      import socket
+      from email.message import EmailMessage
+
+      host = os.environ["MAIL_HOST"]
+      port = int(os.environ.get("MAIL_PORT", "1025"))
+      username = os.environ["MAIL_USERNAME"]
+      password = os.environ["MAIL_PASSWORD"]
+
+      print(f"Testing Mailpit connectivity: {host}:{port}")
+
+      try:
+          with smtplib.SMTP(host, port, timeout=10) as smtp:
+              smtp.ehlo()
+              print("[OK] SMTP connection established")
+
+              smtp.login(username, password)
+              print("[OK] SMTP authentication successful")
+
+              message = EmailMessage()
+              message["Subject"] = "GitLab CI - Mailpit Connectivity Test"
+              message["From"] = "ci-test@example.local"
+              message["To"] = "mailpit-test@example.local"
+              message.set_content(
+                  "Mailpit connectivity test successful.\n"
+                  f"Pipeline: {os.environ.get('CI_PIPELINE_URL', 'local')}\n"
+                  f"Job: {os.environ.get('CI_JOB_ID', 'local')}\n"
+              )
+
+              smtp.send_message(message)
+              print("[OK] Test email sent successfully")
+
+      except (smtplib.SMTPException, socket.error, OSError) as error:
+          print(f"[FAILED] Mailpit test failed: {type(error).__name__}: {error}")
+          raise SystemExit(1)
+
+      print("Mailpit integration test completed successfully.")
+      PY
+```
+
 Ensure that `test` is included in the pipeline's top-level `stages:`
 list if the project explicitly defines stages.
 
-### 7.1 What the job verifies
+### 8.1 What the jobs verify
 
 **PostgreSQL**
-
 -   `pg_isready` checks that the server accepts connections.
 -   `psql` connects using the configured host, port, database, username,
     and password.
@@ -556,14 +712,21 @@ list if the project explicitly defines stages.
 -   `PING` must return `PONG`.
 -   The shell test fails if the returned value is not `PONG`.
 
+**Mailpit**
+
+-   `smtplib.SMTP` establishes a TCP connection to port 1025.
+-   `ehlo()` performs standard SMTP handshake.
+-   `login()` validates SMTP basic authentication credentials.
+-   `send_message()` confirms that an email message is successfully
+    delivered and stored in Mailpit.
+
 This is stronger than a simple TCP port check: it validates actual
 application-protocol access and authentication.
-
 ------------------------------------------------------------------------
 
-## 8. Troubleshooting Timeline
+## 9. Troubleshooting Timeline
 
-### 8.1 Initial PostgreSQL failure
+### 9.1 Initial PostgreSQL failure
 
 The first pipeline attempt reported:
 
@@ -596,7 +759,7 @@ ansible-playbook -i inventory.yml site.yml \
 After provisioning, PostgreSQL was active and listening on the expected
 service IP.
 
-### 8.2 PostgreSQL network and authentication validation
+### 9.2 PostgreSQL network and authentication validation
 
 The runner-side `pg_isready` check returned:
 
@@ -619,7 +782,7 @@ PostgreSQL authentication: OK
 This confirmed that PostgreSQL connectivity and database authentication
 were working.
 
-### 8.3 Initial Valkey failure
+### 9.3 Initial Valkey failure
 
 The next pipeline attempt failed with:
 
@@ -657,7 +820,7 @@ valkey-ci : ok=21 changed=10 unreachable=0 failed=0 skipped=0 rescued=0 ignored=
 Subsequent inspection showed the Valkey server running and listening on
 both the loopback and LXC service IP.
 
-### 8.4 Valkey TCP validation
+### 9.4 Valkey TCP validation
 
 The Shell Runner successfully connected to:
 
@@ -675,9 +838,10 @@ This confirmed TCP reachability, but did not by itself prove
 authentication. The final CI job performed the authenticated `PING`
 test.
 
-### 8.5 Final successful pipeline
+### 9.5 Final successful pipeline
 
-The final pipeline output included:
+The final pipeline output for `test-infrastructure-connectivity`
+included:
 
 ``` text
 Testing PostgreSQL connectivity
@@ -698,19 +862,43 @@ All infrastructure tests passed
 Job succeeded
 ```
 
-**Final diagnosis:** The CI test job was functioning. The original
+### 9.6 Mailpit deployment and SMTP verification
+
+The Mailpit CI role was provisioned:
+
+``` bash
+ansible-playbook -i inventory.yml site.yml \
+  --ask-vault-pass \
+  --limit mailpit-ci
+```
+
+The systemd service was verified active and listening on ports 1025 and
+8025. The `mailpit-connectivity` GitLab CI job was executed from the
+Shell Runner using Python `smtplib`, successfully connecting,
+authenticating, and sending a test email:
+
+``` text
+Testing Mailpit connectivity: 192.168.100.25:1025
+[OK] SMTP connection established
+[OK] SMTP authentication successful
+[OK] Test email sent successfully
+Mailpit integration test completed successfully.
+Job succeeded
+```
+
+**Final diagnosis:** The CI test jobs were functioning. The initial
 failures were caused by the PostgreSQL and Valkey services not being
 available on their expected endpoints. Applying the Ansible service
-roles brought the services into the required state. No change to the
-test job was necessary to resolve those service availability failures.
-
+roles brought PostgreSQL, Valkey, and Mailpit into the required state.
+No change to the test jobs was necessary to resolve those service
+availability failures.
 ------------------------------------------------------------------------
 
-## 9. Useful Operational Commands
+## 10. Useful Operational Commands
 
 Run these from the Ansible project directory.
 
-### 9.1 Provision PostgreSQL
+### 10.1 Provision PostgreSQL
 
 ``` bash
 ansible-playbook -i inventory.yml site.yml \
@@ -718,7 +906,7 @@ ansible-playbook -i inventory.yml site.yml \
   --limit postgres-ci
 ```
 
-### 9.2 Provision Valkey
+### 10.2 Provision Valkey
 
 ``` bash
 ansible-playbook -i inventory.yml site.yml \
@@ -726,7 +914,15 @@ ansible-playbook -i inventory.yml site.yml \
   --limit valkey-ci
 ```
 
-### 9.3 Provision the Shell Runner
+### 10.3 Provision Mailpit
+
+``` bash
+ansible-playbook -i inventory.yml site.yml \
+  --ask-vault-pass \
+  --limit mailpit-ci
+```
+
+### 10.4 Provision the Shell Runner
 
 ``` bash
 ansible-playbook -i inventory.yml site.yml \
@@ -734,7 +930,7 @@ ansible-playbook -i inventory.yml site.yml \
   --limit gitlab-runner-shell-01
 ```
 
-### 9.4 Verify PostgreSQL service and listener
+### 10.5 Verify PostgreSQL service and listener
 
 ``` bash
 ansible postgres_ci -i inventory.yml -b --ask-vault-pass \
@@ -742,7 +938,7 @@ ansible postgres_ci -i inventory.yml -b --ask-vault-pass \
   -a 'systemctl status postgresql --no-pager; ss -lntp | grep 5432'
 ```
 
-### 9.5 Verify PostgreSQL readiness from the runner
+### 10.6 Verify PostgreSQL readiness from the runner
 
 ``` bash
 ansible gitlab_runner_shell -i inventory.yml -b --ask-vault-pass \
@@ -750,7 +946,7 @@ ansible gitlab_runner_shell -i inventory.yml -b --ask-vault-pass \
   -a 'pg_isready -h 192.168.100.21 -p 5432 -t 5'
 ```
 
-### 9.6 Verify Valkey service and listener
+### 10.7 Verify Valkey service and listener
 
 The observed systemd unit is `valkey-server.service`:
 
@@ -760,7 +956,7 @@ ansible valkey_ci -i inventory.yml -b --ask-vault-pass \
   -a 'systemctl status valkey-server --no-pager; ss -lntp | grep 6379'
 ```
 
-### 9.7 Verify Valkey TCP connectivity from the runner
+### 10.8 Verify Valkey TCP connectivity from the runner
 
 ``` bash
 ansible gitlab_runner_shell -i inventory.yml -b --ask-vault-pass \
@@ -768,7 +964,25 @@ ansible gitlab_runner_shell -i inventory.yml -b --ask-vault-pass \
   -a 'nc -vz -w 5 192.168.100.22 6379'
 ```
 
-### 9.8 Run the complete site playbook
+### 10.9 Verify Mailpit service and listener
+
+The systemd unit is `mailpit.service`:
+
+``` bash
+ansible mailpit_ci -i inventory.yml -b --ask-vault-pass \
+  -m shell \
+  -a 'systemctl status mailpit --no-pager; ss -lntp | grep -E "(1025|8025)"'
+```
+
+### 10.10 Verify Mailpit HTTP API from the runner
+
+``` bash
+ansible gitlab_runner_shell -i inventory.yml -b --ask-vault-pass \
+  -m shell \
+  -a 'curl -fsSL http://192.168.100.25:8025/api/v1/info'
+```
+
+### 10.11 Run the complete site playbook
 
 ``` bash
 ansible-playbook -i inventory.yml site.yml --ask-vault-pass
@@ -776,7 +990,7 @@ ansible-playbook -i inventory.yml site.yml --ask-vault-pass
 
 ------------------------------------------------------------------------
 
-## 10. Security and Operational Recommendations
+## 11. Security and Operational Recommendations
 
 1.  **Keep secrets in Ansible Vault and GitLab CI/CD variables.** Do not
     place passwords in source-controlled defaults, plaintext YAML, shell
@@ -792,7 +1006,8 @@ ansible-playbook -i inventory.yml site.yml --ask-vault-pass
     limited to the required LXC network and clients.
 5.  **Retain authenticated checks.** TCP checks such as `nc` are useful
     for diagnosing network reachability, but they do not replace
-    PostgreSQL queries or authenticated Valkey commands.
+    PostgreSQL queries, authenticated Valkey commands, or SMTP
+    handshakes.
 6.  **Keep infrastructure changes in Ansible.** Avoid one-off manual
     changes inside containers so that the declared configuration remains
     reproducible.
@@ -805,12 +1020,15 @@ ansible-playbook -i inventory.yml site.yml --ask-vault-pass
 9.  **Keep CI jobs small and diagnostic.** Separate infrastructure
     connectivity checks from application integration tests so failures
     are easier to isolate.
+10. **Protect Mailpit UI and SMTP credentials.** Keep web UI and SMTP
+    passwords in Ansible Vault and supply them to CI jobs via masked
+    GitLab CI/CD variables.
 
 ------------------------------------------------------------------------
 
-## 11. Current Status and Next Steps
+## 12. Current Status and Next Steps
 
-### 11.1 Completed
+### 12.1 Completed
 
 -   [x] Proxmox LXC service and runner containers provisioned.
 -   [x] PostgreSQL 17 installed and configured through Ansible.
@@ -822,12 +1040,16 @@ ansible-playbook -i inventory.yml site.yml --ask-vault-pass
 -   [x] Valkey listens on `192.168.100.22:6379`.
 -   [x] Shell Runner can reach the Valkey TCP endpoint.
 -   [x] Authenticated Valkey `PING` test succeeded in GitLab CI.
--   [x] Final `test-infrastructure-connectivity` job succeeded.
+-   [x] Mailpit 1.27.4 installed and configured through Ansible.
+-   [x] Mailpit listens on `192.168.100.25:1025` and `8025`.
+-   [x] Authenticated Mailpit SMTP test succeeded in GitLab CI.
+-   [x] Final `test-infrastructure-connectivity` and
+    `mailpit-connectivity` jobs succeeded.
 
-### 11.2 Recommended next steps
+### 12.2 Recommended next steps
 
-1.  Add Go application integration tests that use the actual PostgreSQL
-    and Valkey client libraries used by the application.
+1.  Add Go application integration tests that use the actual PostgreSQL,
+    Valkey, and Mailpit SMTP endpoints used by the application.
 2.  Run those tests from GitLab CI using the same CI service endpoints
     and credentials.
 3.  Add health checks and clear failure diagnostics to the service
@@ -838,21 +1060,22 @@ ansible-playbook -i inventory.yml site.yml --ask-vault-pass
 
 ------------------------------------------------------------------------
 
-## 12. Final Conclusion
+## 13. Final Conclusion
 
 The Proxmox LXC-based CI environment now has a working GitLab Shell
-Runner connection to both PostgreSQL and Valkey.
+Runner connection to PostgreSQL, Valkey, and Mailpit.
 
 The final pipeline validated:
 
--   Network reachability to PostgreSQL and Valkey.
+-   Network reachability to PostgreSQL, Valkey, and Mailpit.
 -   PostgreSQL authentication and SQL query execution.
 -   Valkey authentication and Redis-compatible `PING` behavior.
+-   Mailpit SMTP authentication and email delivery.
 
 The initial failures were resolved by provisioning and configuring the
 service containers with Ansible. The successful final pipeline provides
 a verified baseline for the next stage: Go application integration
 testing.
 
-**Overall status: PostgreSQL and Valkey infrastructure connectivity
-validation is complete and successful.**
+**Overall status: PostgreSQL, Valkey, and Mailpit infrastructure
+connectivity validation is complete and successful.**

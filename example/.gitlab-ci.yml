@@ -117,3 +117,56 @@ test-infrastructure-connectivity:
       echo "=================================="
       echo "All infrastructure tests passed"
       echo "=================================="
+
+mailpit-connectivity:
+  stage: test
+  tags:
+    - shell
+
+  variables:
+    PYTHONDONTWRITEBYTECODE: "1"
+
+  script:
+    - |
+      python3 - <<'PY'
+      import os
+      import smtplib
+      import socket
+      from email.message import EmailMessage
+
+      host = os.environ["MAIL_HOST"]
+      port = int(os.environ.get("MAIL_PORT", "1025"))
+      username = os.environ["MAIL_USERNAME"]
+      password = os.environ["MAIL_PASSWORD"]
+
+      print(f"Testing Mailpit connectivity: {host}:{port}")
+
+      try:
+          with smtplib.SMTP(host, port, timeout=10) as smtp:
+              smtp.ehlo()
+              print("[OK] SMTP connection established")
+
+              smtp.login(username, password)
+              print("[OK] SMTP authentication successful")
+
+              message = EmailMessage()
+              message["Subject"] = "GitLab CI - Mailpit Connectivity Test"
+              message["From"] = "ci-test@example.local"
+              message["To"] = "mailpit-test@example.local"
+              message.set_content(
+                  "Mailpit connectivity test successful.\n"
+                  f"Pipeline: {os.environ.get('CI_PIPELINE_URL', 'local')}\n"
+                  f"Job: {os.environ.get('CI_JOB_ID', 'local')}\n"
+              )
+
+              smtp.send_message(message)
+              print("[OK] Test email sent successfully")
+
+      except (smtplib.SMTPException, socket.error, OSError) as error:
+          print(f"[FAILED] Mailpit test failed: {type(error).__name__}: {error}")
+          raise SystemExit(1)
+
+      print("Mailpit integration test completed successfully.")
+      PY
+  rules:
+    - if: '$CI_COMMIT_BRANCH'

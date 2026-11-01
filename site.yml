@@ -28,3 +28,9 @@
   become: true
   roles:
     - gitlab_build_runner
+
+- name: Configure Mailpit CI service
+  hosts: mailpit-ci
+  become: true
+  roles:
+    - mailpit_ci

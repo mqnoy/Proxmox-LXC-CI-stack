@@ -1,0 +1,6 @@
+---
+- name: Restart Mailpit
+  ansible.builtin.systemd:
+    name: mailpit
+    state: restarted
+    daemon_reload: true
