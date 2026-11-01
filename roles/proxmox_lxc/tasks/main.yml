@@ -29,9 +29,9 @@
     memory: "{{ item.memory }}"
     swap: "{{ item.swap }}"
     unprivileged: "{{ item.unprivileged | default(true) }}"
-    password: "{{ item.password }}"
+    password: "{{ item.password | default(vault_lxc_password) }}"
     netif: "{{ item.netif }}"
-    pubkey: "{{ item.ssh_public_keys | default(omit) }}"
+    pubkey: "{{ item.ssh_public_keys | default(proxmox_ssh_public_key) }}"
     features: "{{ item.features | default(omit) }}"
     state: present
   loop: "{{ proxmox_lxc_containers }}"
