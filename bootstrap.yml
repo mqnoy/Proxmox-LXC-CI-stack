@@ -1,6 +1,6 @@
 ---
 - name: Bootstrap Ansible access on Proxmox LXC
-  hosts: lxc_bootstrap
+  hosts: all
   gather_facts: false
   become: true
 
